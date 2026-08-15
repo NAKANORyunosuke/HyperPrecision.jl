@@ -1,7 +1,6 @@
 # HyperPrecision.jl
 
 [![CI](https://github.com/NAKANORyunosuke/HyperPrecision.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/NAKANORyunosuke/HyperPrecision.jl/actions/workflows/CI.yml)
-[![codecov](https://codecov.io/gh/NAKANORyunosuke/HyperPrecision.jl/graph/badge.svg)](https://codecov.io/gh/NAKANORyunosuke/HyperPrecision.jl)
 [![License: GPL-3.0-only](https://img.shields.io/badge/License-GPL--3.0--only-blue.svg)](LICENSE)
 
 `HyperPrecision.jl` evaluates complete Horn-type multivariate hypergeometric
@@ -222,7 +221,7 @@ boundary-testing criteria, and the licensing and release requirements.
 Validation compares the certified enclosures with a separate Arb
 zero-balanced-series evaluator. The standard test suite runs on the oldest
 supported and latest stable Julia releases in CI, and its coverage report is
-uploaded to Codecov.
+recorded in the job summary and retained as a CI artifact for 90 days.
 
 ## References
 

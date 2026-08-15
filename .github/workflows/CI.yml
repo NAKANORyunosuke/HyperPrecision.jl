@@ -21,7 +21,6 @@ jobs:
     permissions:
       actions: write
       contents: read
-      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -53,8 +52,21 @@ jobs:
       - if: matrix.coverage
         uses: julia-actions/julia-processcoverage@v1
       - if: matrix.coverage
-        uses: codecov/codecov-action@v7
+        name: Add coverage to the job summary
+        shell: bash
+        run: |
+          awk -F: '
+            /^LF:/ { lines += $2 }
+            /^LH:/ { hits += $2 }
+            END {
+              percentage = lines == 0 ? 0 : 100 * hits / lines
+              printf "### Line coverage\n\n%d/%d lines (%.2f%%)\n", hits, lines, percentage
+            }
+          ' lcov.info >> "$GITHUB_STEP_SUMMARY"
+      - if: matrix.coverage
+        uses: actions/upload-artifact@v7
         with:
-          files: lcov.info
-          use_oidc: true
-          fail_ci_if_error: true
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: error
+          retention-days: 90
