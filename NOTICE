@@ -1,0 +1,23 @@
+HyperPrecision.jl
+Copyright (C) 2026 NAKANO Ryuosuke and contributors
+
+HyperPrecision.jl is a Julia port and reimplementation based on the method
+described in the following paper:
+
+  Sumit Banik and Souvik Bera,
+  "HyperPrecision: A Mathematica package for High-Precision Numerical
+  Evaluation of Multivariate Hypergeometric Functions",
+  arXiv:2605.30216.
+
+The Mathematica reference implementation is available at
+
+  https://github.com/HyperPrecision/HyperPrecision
+
+and identifies Sumit Banik and Souvik Bera as its authors. The reference
+implementation is distributed under version 3 of the GNU General Public
+License. This repository does not include the Mathematica source files.
+
+The Julia implementation and its modifications are recorded in this
+repository from August 15, 2026. HyperPrecision.jl is distributed under
+version 3 of the GNU General Public License, with no option to use a later
+version. See LICENSE for the complete terms.

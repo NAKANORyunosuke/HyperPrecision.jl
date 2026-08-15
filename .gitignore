@@ -1,0 +1,7 @@
+/Manifest.toml
+/LocalPreferences.toml
+/coverage/
+*.cov
+*.jl.cov
+*.jl.mem
+/docs/build/
