@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
+jobs:
+  test:
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      actions: write
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "1.10"
+            os: ubuntu-latest
+            coverage: false
+          - version: "1"
+            os: ubuntu-latest
+            coverage: true
+          - version: "1"
+            os: windows-latest
+            coverage: false
+          - version: "1"
+            os: macos-latest
+            coverage: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ matrix.version }}
+      - uses: julia-actions/cache@v3
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+        with:
+          check_bounds: "yes"
+          coverage: ${{ matrix.coverage }}
+          depwarn: "error"
+      - if: matrix.coverage
+        uses: julia-actions/julia-processcoverage@v1
+      - if: matrix.coverage
+        uses: codecov/codecov-action@v7
+        with:
+          files: lcov.info
+          use_oidc: true
+          fail_ci_if_error: true

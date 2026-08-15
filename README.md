@@ -1,5 +1,9 @@
 # HyperPrecision.jl
 
+[![CI](https://github.com/NAKANORyunosuke/HyperPrecision.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/NAKANORyunosuke/HyperPrecision.jl/actions/workflows/CI.yml)
+[![codecov](https://codecov.io/gh/NAKANORyunosuke/HyperPrecision.jl/graph/badge.svg)](https://codecov.io/gh/NAKANORyunosuke/HyperPrecision.jl)
+[![License: GPL-3.0-only](https://img.shields.io/badge/License-GPL--3.0--only-blue.svg)](LICENSE)
+
 `HyperPrecision.jl` evaluates complete Horn-type multivariate hypergeometric
 series with arbitrary precision at real or complex points. It implements the
 Pfaffian-transport method of Banik and Bera in Julia.
@@ -208,6 +212,17 @@ Banik and Bera and their GPL-3.0 Mathematica reference implementation. It does
 not include the Mathematica source files. See [`NOTICE`](NOTICE) for the
 attribution and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the
 runtime dependencies.
+
+## Development disclosure
+
+OpenAI Codex contributed substantial portions of the initial Julia
+implementation, tests, and documentation. NAKANO Ryuosuke specified the
+mathematical scope, the five certified mean-iteration families, the
+boundary-testing criteria, and the licensing and release requirements.
+Validation compares the certified enclosures with a separate Arb
+zero-balanced-series evaluator. The standard test suite runs on the oldest
+supported and latest stable Julia releases in CI, and its coverage report is
+uploaded to Codecov.
 
 ## References
 

@@ -3,7 +3,10 @@
 
 using HyperPrecision
 using Arblib
+using Aqua
 using Test
+
+Aqua.test_all(HyperPrecision)
 
 function arb_digamma(value, bits)
     result = Arb(0; prec = bits)
