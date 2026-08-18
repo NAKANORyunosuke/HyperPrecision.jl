@@ -225,16 +225,26 @@ recorded in the job summary and retained as a CI artifact for 90 days.
 
 ## References
 
-- [S. Banik and S. Bera](https://arxiv.org/abs/2605.30216), *HyperPrecision: A Mathematica package for
+- [S. Banik and S. Bera, *HyperPrecision: A Mathematica package for
   High-Precision Numerical Evaluation of Multivariate Hypergeometric
-  Functions*, arXiv:2605.30216v2.
-- [J. Borwein, P. Borwein, and F. Garvan](https://www.cecm.sfu.ca/~pborwein/PAPERS/P63.pdf),
-  *Hypergeometric Analogues of the Arithmetic-Geometric Mean Iteration*.
-- [K. Matsumoto, *Hypergeometric Functions and Mean Iterations*](https://ems.press/content/serial-article-files/46185?nt=1),
-  Oberwolfach Report 45/2008; the report records the Koike-Shiga iteration.
-- [T. Kato and K. Matsumoto](https://www.math.sci.hokudai.ac.jp/~matsu/pdf/KM080624.pdf),
-  *The Common Limit of a Quadruple Sequence and the Hypergeometric Function
-  FD of Three Variables*.
+  Functions*](https://doi.org/10.1016/j.cpc.2026.110328), *Computer Physics
+  Communications* **328** (2026), 110328;
+  [arXiv:2605.30216v2](https://arxiv.org/abs/2605.30216v2).
+- [J. M. Borwein, P. B. Borwein, and F. G. Garvan, *Hypergeometric Analogues
+  of the Arithmetic-Geometric Mean
+  Iteration*](https://doi.org/10.1007/BF01204654), *Constructive
+  Approximation* **9** (1993), 509–523.
+- [K. Koike and H. Shiga, *Isogeny formulas for the Picard modular form and a
+  three terms arithmetic geometric
+  mean*](https://doi.org/10.1016/j.jnt.2006.08.002), *Journal of Number
+  Theory* **124** (2007), 123–141.
+- [T. Kato and K. Matsumoto, *The Common Limit of a Quadruple Sequence and
+  the Hypergeometric Function FD of Three
+  Variables*](https://doi.org/10.1017/S0027763000009739), *Nagoya
+  Mathematical Journal* **195** (2009), 113–124.
+- [F. Johansson, *Arb: Efficient Arbitrary-Precision Midpoint-Radius Interval
+  Arithmetic*](https://doi.org/10.1109/TC.2017.2690633), *IEEE Transactions
+  on Computers* **66** (2017), no. 8, 1281–1292.
 - [Arblib.jl documentation](https://kalmarek.github.io/Arblib.jl/stable/).
 - The reference Mathematica implementation is distributed under GNU GPL
   version 3 at
