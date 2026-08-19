@@ -144,7 +144,9 @@ struct DifferentialOperator{N,T}
     terms::Dict{NTuple{N,Int},Any}
 end
 
-struct PfaffianSystem{N,T}
+abstract type AbstractPfaffianSystem{N,T} end
+
+struct PfaffianSystem{N,T} <: AbstractPfaffianSystem{N,T}
     series::NumericHornSeries{N,T}
     basis::Vector{NTuple{N,Int}}
     equations::Vector{DifferentialOperator{N,T}}
@@ -155,6 +157,120 @@ struct PfaffianSystem{N,T}
     orders::Vector{Int}
     bits::Int
     digits::Int
+end
+
+"""
+    UserPfaffianSystem(variables, connection; rank, connection_degree = nothing,
+                       connection_tail_bound = nothing, singular_factors,
+                       singular_degrees, digits = 50, flatness = :check)
+
+Represent a directly supplied Pfaffian connection. `connection(point)` must
+return one square matrix for each variable (a vector of matrix-valued
+callables is also accepted). Each entry of `singular_factors` is either a
+callable or a `Symbol => callable` pair; `singular_degrees` gives a line-degree
+upper bound for the corresponding factor. The first research release evaluates
+these callables with `Complex{BigFloat}` midpoint arithmetic and rejects a
+factor whose reconstructed polynomial fails independent hold-out evaluations.
+Fundamental transport additionally requires `connection_degree`, a conservative
+upper bound for the numerator degree after restriction to any affine line.
+When a restricted line has a pole, `connection_tail_bound(center, direction,
+step, order)` must bound the integrated norm of all connection-series terms of
+degree at least `order` on the proposed local step.
+"""
+struct UserPfaffianSystem{N,T,C} <: AbstractPfaffianSystem{N,T}
+    variables::NTuple{N,Symbol}
+    connection::C
+    connection_degree::Union{Nothing,Int}
+    connection_tail_bound::Any
+    factor_functions::Vector{Any}
+    factor_labels::Vector{Symbol}
+    factor_degrees::Vector{Int}
+    basis::Vector{Symbol}
+    rank::Int
+    bits::Int
+    digits::Int
+    flatness_contract::Symbol
+end
+
+function UserPfaffianSystem(
+    variables,
+    connection;
+    rank::Integer,
+    connection_series = nothing,
+    connection_degree::Union{Nothing,Integer} = nothing,
+    connection_tail_bound = nothing,
+    singular_factors = Any[],
+    singular_degrees = nothing,
+    basis = nothing,
+    digits::Integer = 50,
+    flatness::Symbol = :check,
+)
+    names = Tuple(Symbol.(collect(variables)))
+    isempty(names) && throw(ArgumentError("a user Pfaffian system needs at least one variable"))
+    dimension = length(names)
+    length(unique(names)) == dimension ||
+        throw(ArgumentError("user Pfaffian variable names must be unique"))
+    rank > 0 || throw(ArgumentError("the Pfaffian rank must be positive"))
+    digits > 0 || throw(ArgumentError("digits must be positive"))
+    flatness in (:check, :declared_flat) || throw(
+        ArgumentError("flatness must be :check or :declared_flat"),
+    )
+    connection isa AbstractVector && length(connection) != dimension && throw(
+        DimensionMismatch("one connection matrix callable is required per variable"),
+    )
+    isnothing(connection_degree) || connection_degree >= 0 || throw(
+        ArgumentError("connection_degree must be nonnegative"),
+    )
+    isnothing(connection_series) || throw(
+        UnsupportedError(
+            "connection_series prefixes have no omitted-tail contract; supply connection_degree and the connection callable",
+        ),
+    )
+
+    entries = collect(singular_factors)
+    functions = Any[]
+    labels = Symbol[]
+    for (index, entry) in enumerate(entries)
+        if entry isa Pair
+            push!(labels, Symbol(first(entry)))
+            push!(functions, last(entry))
+        else
+            push!(labels, Symbol("D", index))
+            push!(functions, entry)
+        end
+    end
+    length(unique(labels)) == length(labels) ||
+        throw(ArgumentError("singular-factor labels must be unique"))
+    degrees = isnothing(singular_degrees) ?
+              (isempty(entries) ? Int[] : throw(
+                  ArgumentError("singular_degrees is required for direct singular factors"),
+              )) : Int.(collect(singular_degrees))
+    length(degrees) == length(functions) ||
+        throw(DimensionMismatch("singular_degrees must match singular_factors"))
+    all(degree >= 0 for degree in degrees) ||
+        throw(ArgumentError("singular-factor degree bounds must be nonnegative"))
+
+    basis_names = isnothing(basis) ?
+                  [Symbol("e", index) for index in 1:Int(rank)] : Symbol.(collect(basis))
+    length(basis_names) == rank ||
+        throw(DimensionMismatch("the user basis length must equal rank"))
+    length(unique(basis_names)) == rank ||
+        throw(ArgumentError("user basis labels must be unique"))
+    value_type = Complex{BigFloat}
+    return UserPfaffianSystem{dimension,value_type,typeof(connection)}(
+        names,
+        connection,
+        isnothing(connection_degree) ? nothing : Int(connection_degree),
+        connection_tail_bound,
+        functions,
+        labels,
+        degrees,
+        basis_names,
+        Int(rank),
+        _digits_to_bits(Int(digits)),
+        Int(digits),
+        flatness,
+    )
 end
 
 struct RestrictedPfaffianSystem{N,T}
@@ -249,6 +365,119 @@ struct CertificationError <: Exception
 end
 
 Base.showerror(io::IO, error::CertificationError) = print(io, error.message)
+
+"""
+    UnsupportedError(message)
+
+Report a deliberately unsupported numerical guarantee or frontend.  In
+particular, the monodromy engine currently implements robust midpoint
+arithmetic in `mode = :fast`; it never silently treats that result as a ball
+certificate.
+"""
+struct UnsupportedError <: Exception
+    message::String
+end
+
+Base.showerror(io::IO, error::UnsupportedError) = print(io, error.message)
+
+"""
+    PiecewiseLinearPath(points, path_class, planner, metadata)
+
+A directed polygonal path.  `points` includes both endpoints.  `path_class`
+records the requested branch/homotopy label, while `planner` records how the
+vertices were obtained.
+"""
+struct PiecewiseLinearPath{T}
+    points::Vector{Vector{T}}
+    path_class::Symbol
+    planner::Symbol
+    metadata::NamedTuple
+end
+
+"""A (possibly composite) numerical equation for the singular divisor."""
+struct SingularFactor{N,T,S<:AbstractPfaffianSystem{N,T}}
+    system::S
+    index::Int
+    label::Symbol
+    description::String
+end
+
+"""
+    MeridianSpecification(label, point, direction; radius = nothing)
+
+Describe a smooth point of a multivariate singular component and a transverse
+complex direction.  A safe radius is selected automatically when `radius` is
+`nothing`.
+"""
+struct MeridianSpecification{T}
+    label::Symbol
+    point::Vector{T}
+    direction::Vector{T}
+    radius::Union{Nothing,BigFloat}
+end
+
+"""A named based loop used as a numerical monodromy generator."""
+struct MonodromyGenerator{T}
+    label::Symbol
+    path::PiecewiseLinearPath{T}
+    component_point::Vector{T}
+    radius::BigFloat
+end
+
+"""One accepted local Taylor transport patch."""
+struct TransportHistoryEntry
+    segment::Int
+    parameter_start::BigFloat
+    step::BigFloat
+    order::Int
+    estimated_error::BigFloat
+    differential_residual::BigFloat
+    restricted_radius::BigFloat
+    condition_number::BigFloat
+    working_digits::Int
+end
+
+"""Mutable summary populated while a fundamental matrix is transported."""
+mutable struct TransportDiagnostics
+    accepted_steps::Int
+    rejected_steps::Int
+    estimated_error::BigFloat
+    maximum_differential_residual::BigFloat
+    reverse_residual::BigFloat
+    minimum_restricted_radius::BigFloat
+    maximum_condition_number::BigFloat
+    precision_history::Vector{Int}
+    warnings::Vector{String}
+end
+
+"""
+    FactorizedFundamentalTransport
+
+Store local transport matrices in traversal order.  If the factors are
+`E1, E2, ...`, `materialize(T)` returns `... * E2 * E1`.
+"""
+struct FactorizedFundamentalTransport{T}
+    factors::Vector{Matrix{T}}
+    rank::Int
+    path::PiecewiseLinearPath{T}
+    history::Vector{TransportHistoryEntry}
+    diagnostics::TransportDiagnostics
+    digits::Int
+    mode::Symbol
+end
+
+"""A numerical monodromy representation with explicitly unknown completeness."""
+struct NumericalMonodromyRepresentation{T}
+    basepoint::Vector{T}
+    basis::Vector
+    generators::Vector{MonodromyGenerator{T}}
+    matrices::Dict{Symbol,Matrix{T}}
+    transports::Dict{Symbol,FactorizedFundamentalTransport{T}}
+    verified_relations::Dict{Symbol,BigFloat}
+    flatness::NamedTuple
+    generator_set_complete::Symbol
+    mode::Symbol
+end
 
 _digits_to_bits(digits::Integer; guard::Integer = 20) =
     ceil(Int, (digits + guard) * log2(10))
