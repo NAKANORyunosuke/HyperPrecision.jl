@@ -687,6 +687,7 @@ function initial_vector(
     point;
     digits::Integer = system.digits,
     maximum_degree::Integer = 260,
+    maximum_series_terms::Integer = _DEFAULT_SERIES_TERM_BUDGET,
 ) where {N,T}
     length(point) == N || throw(DimensionMismatch("the point has the wrong dimension"))
     digits <= system.digits || throw(
@@ -700,6 +701,7 @@ function initial_vector(
             system.basis;
             digits = Int(digits),
             maximum_degree = Int(maximum_degree),
+            maximum_terms = Int(maximum_series_terms),
         )
         converged || throw(
             ArgumentError(

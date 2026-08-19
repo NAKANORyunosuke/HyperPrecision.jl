@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 NAKANO Ryuosuke and contributors
 # SPDX-License-Identifier: GPL-3.0-only
 
+const _DEFAULT_SERIES_TERM_BUDGET = 250_000
+
 function _rising_factorial(value::T, order::Int) where {T}
     result = one(T)
     if order >= 0
@@ -78,15 +80,21 @@ function _series_vector(
     basis::Vector{NTuple{N,Int}};
     digits::Int,
     maximum_degree::Int = 240,
+    maximum_terms::Int = _DEFAULT_SERIES_TERM_BUDGET,
 ) where {N,T}
     length(point) == N || throw(DimensionMismatch("the point has the wrong length"))
+    maximum_terms > 0 || throw(ArgumentError("maximum_terms must be positive"))
     values = zeros(T, length(basis))
     tolerance = big(10.0)^(-(digits + 8))
     consecutive_small = 0
     consecutive_growth = 0
     previous_norm = BigFloat(Inf)
+    shell_terms = 1
+    used_terms = 0
 
     for degree in 0:maximum_degree
+        shell_terms > maximum_terms - used_terms && return values, false, degree - 1
+        used_terms += shell_terms
         shell = zeros(T, length(basis))
         _foreach_composition!(degree, Val(N)) do index
             coefficient = _series_coefficient(series, index)
@@ -124,6 +132,10 @@ function _series_vector(
             return values, false, degree
         end
         previous_norm = shell_norm
+        if degree < maximum_degree
+            next_shell = big(shell_terms) * (degree + N) ÷ (degree + 1)
+            shell_terms = next_shell > maximum_terms ? maximum_terms + 1 : Int(next_shell)
+        end
     end
     return values, false, maximum_degree
 end
@@ -133,6 +145,7 @@ function _direct_series_value(
     target::AbstractVector;
     digits::Int,
     maximum_degree::Int,
+    maximum_terms::Int = _DEFAULT_SERIES_TERM_BUDGET,
 ) where {N,T}
     zero_index = ntuple(_ -> 0, N)
     values, converged, degree = _series_vector(
@@ -141,6 +154,7 @@ function _direct_series_value(
         [zero_index];
         digits,
         maximum_degree,
+        maximum_terms,
     )
     return first(values), converged, degree
 end
@@ -149,6 +163,7 @@ function _boundary_series(
     system::PfaffianSystem{N,T},
     target::AbstractVector;
     maximum_degree::Int = 260,
+    maximum_terms::Int = _DEFAULT_SERIES_TERM_BUDGET,
 ) where {N,T}
     maximum_target = maximum(abs, target; init = zero(BigFloat))
     maximum_target == 0 && return zeros(T, N), [
@@ -169,6 +184,7 @@ function _boundary_series(
             system.basis;
             digits = system.digits + 8,
             maximum_degree,
+            maximum_terms,
         )
         converged && return start, values
         scale /= 2

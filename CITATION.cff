@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use HyperPrecision.jl, please cite both this software and the Banik--Bera paper."
+title: "HyperPrecision.jl"
+type: software
+authors:
+  - family-names: "Nakano"
+    given-names: "Ryuosuke"
+version: 0.2.0
+license: GPL-3.0-only
+date-released: 2026-08-19
+repository-code: "https://github.com/NAKANORyunosuke/HyperPrecision.jl"
+references:
+  - type: article
+    title: "HyperPrecision: A Mathematica package for High-Precision Numerical Evaluation of Multivariate Hypergeometric Functions"
+    authors:
+      - family-names: "Banik"
+        given-names: "Sumit"
+      - family-names: "Bera"
+        given-names: "Souvik"
+    journal: "Computer Physics Communications"
+    volume: 328
+    year: 2026
+    doi: "10.1016/j.cpc.2026.110328"

@@ -88,6 +88,8 @@ end
     @test compatibility.passed
 end
 
+include("lauricella_fd.jl")
+
 @testset "Epsilon reconstruction" begin
     parameter = epsilon_parameter(1//3, 1)
     z = big"0.2"

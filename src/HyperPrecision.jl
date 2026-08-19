@@ -12,6 +12,7 @@ export AffineParameter,
        UnsupportedError,
        HornSeries,
        LaurentExpansion,
+       LauricellaFDResult,
        PfaffianSystem,
        UserPfaffianSystem,
        RestrictedPfaffianSystem,
@@ -74,7 +75,8 @@ export AffineParameter,
        lauricella_fa,
        lauricella_fb,
        lauricella_fc,
-       lauricella_fd
+       lauricella_fd,
+       lauricella_fd_pfaffian
 
 include("types.jl")
 include("polynomials.jl")
@@ -84,6 +86,7 @@ include("certified.jl")
 include("frobenius.jl")
 include("transport.jl")
 include("monodromy.jl")
+include("lauricella_fd.jl")
 include("epsilon.jl")
 include("predefined.jl")
 

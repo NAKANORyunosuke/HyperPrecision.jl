@@ -39,6 +39,18 @@ relative_matrix_distance(left, right) = BigFloat(
         @test length(factors) == 1
         @test isfinite(abs(first(factors)(basepoint)))
         @test !iszero(first(factors)(basepoint))
+        if name === :FD3
+            direct = lauricella_fd_pfaffian(1//3, [1//4, 2//5, 3//7], 7//6; digits = 16)
+            direct_matrices = connection_matrices(direct, basepoint)
+            desired_basis = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+            permutation = [only(findall(==(derivative), system.basis)) for derivative in desired_basis]
+            @test maximum(
+                relative_matrix_distance(
+                    direct_matrices[index],
+                    matrices[index][permutation, permutation],
+                ) for index in 1:3
+            ) < big"1e-14"
+        end
     end
 end
 

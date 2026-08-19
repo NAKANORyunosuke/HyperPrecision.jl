@@ -78,7 +78,7 @@ function _restricted_matrix(
 end
 
 function _collocation_step(
-    system::PfaffianSystem{N,T},
+    system::AbstractPfaffianSystem{N,T},
     start::Vector{T},
     direction::Vector{T},
     parameter::BigFloat,
@@ -168,7 +168,7 @@ function _doubled_step(
 end
 
 function _integrate_segment(
-    system::PfaffianSystem{N,T},
+    system::AbstractPfaffianSystem{N,T},
     segment_start::Vector{T},
     segment_end::Vector{T},
     initial_value::Vector{T};
@@ -176,6 +176,7 @@ function _integrate_segment(
     stages::Int,
     maximum_steps::Int,
     verbose::Bool,
+    error_accumulator = nothing,
 ) where {N,T}
     direction = segment_end .- segment_start
     maximum(abs, direction; init = zero(BigFloat)) == 0 && return initial_value
@@ -224,6 +225,8 @@ function _integrate_segment(
 
         if error_norm <= tolerance || step <= minimum_step
             value = fine .+ difference ./ denominator
+            isnothing(error_accumulator) ||
+                (error_accumulator[] += BigFloat(error_norm * scale))
             parameter += step
             accepted += 1
             factor = error_norm == 0 ? BigFloat(2) :
@@ -287,6 +290,7 @@ function transport_de(
     frobenius_order::Union{Nothing,Integer} = nothing,
     stages::Union{Nothing,Integer} = nothing,
     maximum_degree::Integer = 260,
+    maximum_series_terms::Integer = _DEFAULT_SERIES_TERM_BUDGET,
     maximum_steps::Integer = 20_000,
     verbose::Bool = false,
 ) where {N,T}
@@ -301,6 +305,7 @@ function transport_de(
             numeric_target;
             digits = Int(digits),
             maximum_degree = min(Int(maximum_degree), 180),
+            maximum_terms = Int(maximum_series_terms),
         )
         if converged
             values, basis_converged, _ = _series_vector(
@@ -309,6 +314,7 @@ function transport_de(
                 system.basis;
                 digits = Int(digits),
                 maximum_degree = Int(maximum_degree),
+                maximum_terms = Int(maximum_series_terms),
             )
             basis_converged && return values
         end
@@ -317,6 +323,7 @@ function transport_de(
             system,
             numeric_target;
             maximum_degree = Int(maximum_degree),
+            maximum_terms = Int(maximum_series_terms),
         )
         path = _normalise_waypoints(numeric_target, branch_side, waypoints)
         solver in (:frobenius, :collocation) ||
@@ -393,6 +400,7 @@ function evaluate(
     frobenius_order::Union{Nothing,Integer} = nothing,
     stages::Union{Nothing,Integer} = nothing,
     maximum_degree::Integer = 260,
+    maximum_series_terms::Integer = _DEFAULT_SERIES_TERM_BUDGET,
     maximum_steps::Integer = 20_000,
     verbose::Bool = false,
 ) where {N}
@@ -424,6 +432,7 @@ function evaluate(
             numeric_target;
             digits = working_digits,
             maximum_degree = min(Int(maximum_degree), 180),
+            maximum_terms = Int(maximum_series_terms),
         )
         converged && return _chop_value(direct, Int(digits))
 
@@ -444,6 +453,7 @@ function evaluate(
                 frobenius_order,
                 stages,
                 maximum_degree,
+                maximum_series_terms,
                 maximum_steps,
                 verbose,
             ),

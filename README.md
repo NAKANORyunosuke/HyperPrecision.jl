@@ -32,6 +32,8 @@ The package provides the following computations.
    `NumericalMonodromyRepresentation`.
 8. It reconstructs Laurent expansions from evaluations on an epsilon grid.
 9. It evaluates five parameter families by certified AGM-type mean iterations.
+10. It evaluates Lauricella `FD` by a total-degree recurrence, an Euler
+    integral, or an explicit rank-`n+1` Pfaffian connection.
 
 The predefined hypergeometric interfaces are `hypergeometric_pfq`,
 `appell_f1` through `appell_f4`, `horn_g1` through `horn_g3`, `horn_h1`
@@ -114,6 +116,93 @@ expansion.estimated_error
 
 The pole order is inferred from the affine Pochhammer parameters. The keyword
 `pole_order` overrides the inferred order.
+
+### Lauricella FD dispatch
+
+The function `lauricella_fd` accepts `method = :auto`, `:closed_form`,
+`:series`, `:euler`, `:pfaffian`, or `:generic`. The default `:auto` method
+estimates the work before it starts a numerical method. It uses the product
+formula when `a = c`, the lower parameter is not a nonpositive integer, and the
+arguments avoid the principal branch cut. It uses a total-degree coefficient
+recurrence in the convergence polydisk, the one-dimensional Euler integral when
+its parameter and branch conditions hold, and the explicit Pfaffian connection
+in the remaining regular cases. A nonpositive integral `a` selects its finite
+total-degree series even outside the convergence polydisk. If an automatically
+selected Euler
+quadrature does not converge, evaluation continues with the Pfaffian method at
+a regular target. The `:auto` method does not enumerate weak compositions. The
+`:generic` method retains the general Horn-series route for compatibility and
+must be selected explicitly when the specialized methods do not apply. The
+general Horn-series engine also stops direct enumeration after
+`maximum_series_terms` cumulative terms (250,000 by default) before it tries
+Pfaffian transport.
+
+```julia
+a = 1//4
+b = fill(1//4, 7)
+c = 1
+x = [1//2, 1//3, 1//4, 1//5, 1//6, 1//7, 1//8]
+
+value = lauricella_fd(a, b, c, x; digits = 30)
+check = lauricella_fd(a, b, c, x; digits = 30, method = :euler)
+details = lauricella_fd(a, b, c, x; digits = 30, return_diagnostics = true)
+```
+
+The opt-in `LauricellaFDResult` stores `value`, `method_used`, `degree`,
+`error_estimate`, `elapsed_seconds`, `compressed_dimension`, and
+`convergence_test`. Thus an
+automatic call and a forced-method call can be compared under the same input
+conditions without changing the scalar-returning default API. The field
+`error_estimate` is an a posteriori numerical estimate, not a ball enclosure;
+the `:generic` result uses `NaN` when the general engine does not expose an
+estimate. The field `degree` is `nothing` for a non-series method. Without an
+explicit contour, zero arguments are removed and coincident arguments are
+merged by adding their corresponding `b_i`; `compressed_dimension` records the
+resulting number of variables. Compression is performed on the original input
+objects. The working precision is increased when large parameters or nearby
+arguments indicate a potential loss from cancellation.
+
+The specialized series accepts a truncation after an absolute-parameter
+majorant bounds its omitted tail. When signed parameters make this majorant
+inconclusive, it compares two fixed total degrees and repeats the calculation
+at increasing working precisions. The field `convergence_test` is `:majorant`
+or `:doubled_degree` for these two cases.
+
+For `a = c`, the automatically selected closed form is
+
+```math
+F_D^{(n)}(a;b_1,\ldots,b_n;a;x_1,\ldots,x_n)
+=\prod_{i=1}^n(1-x_i)^{-b_i}.
+```
+
+The Euler method uses the integral expression
+
+```math
+F_D^{(n)}(a;b_1,\ldots,b_n;c;x_1,\ldots,x_n)
+=\frac{1}{B(a,c-a)}\int_0^1
+t^{a-1}(1-t)^{c-a-1}\prod_{i=1}^n(1-x_i t)^{-b_i}\,dt.
+```
+
+It requires `real(a) > 0` and `real(c-a) > 0`, and the integration segment must
+avoid the branch points. The implementation evaluates the normalized ratio of
+two double-exponential quadratures, so it does not add a special-function
+dependency.
+
+The direct constructor
+
+```julia
+system = lauricella_fd_pfaffian(a, b, c; digits = 30)
+```
+
+returns a `UserPfaffianSystem` with respect to the basis
+`[F, dF/dx_1, ..., dF/dx_n]`. It forms the connection matrices from the
+Lauricella differential equations without a generic Macaulay derivation. It
+also supplies the rational-connection tail bound used by full fundamental
+transport. Run the seven-variable cold and warm benchmark by
+
+```bash
+julia --project=. benchmark/lauricella_fd.jl
+```
 
 ## Full Pfaffian connection
 

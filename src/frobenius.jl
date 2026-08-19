@@ -191,7 +191,7 @@ function _evaluate_frobenius_series(
 end
 
 function _integrate_segment_frobenius(
-    system::PfaffianSystem{N,T},
+    system::AbstractPfaffianSystem{N,T},
     segment_start::Vector{T},
     segment_end::Vector{T},
     initial_value::Vector{T};
@@ -199,6 +199,7 @@ function _integrate_segment_frobenius(
     series_order::Int,
     maximum_steps::Int,
     verbose::Bool,
+    error_accumulator = nothing,
 ) where {N,T}
     direction = segment_end .- segment_start
     maximum(abs, direction; init = zero(BigFloat)) == 0 && return initial_value
@@ -240,6 +241,10 @@ function _integrate_segment_frobenius(
         accepted || throw(
             ErrorException("the Frobenius series did not converge along the selected contour"),
         )
+        if !isnothing(error_accumulator)
+            scale = max(maximum(abs, candidate; init = zero(BigFloat)), one(BigFloat))
+            error_accumulator[] += BigFloat(relative_tail * scale)
+        end
         value = candidate
         parameter += step
         verbose && println(

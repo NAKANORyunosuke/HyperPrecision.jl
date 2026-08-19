@@ -327,7 +327,64 @@ function lauricella_fc(a, b, c, x; epsilon_order = nothing, kwargs...)
     return _finish_predefined(_lauricella_fc_series(a, b, c), x; epsilon_order, kwargs...)
 end
 
-function lauricella_fd(a, b, c, x; epsilon_order = nothing, kwargs...)
+"""
+    lauricella_fd(a, b, c, x; method = :auto, digits = 50,
+                  return_diagnostics = false)
+
+Evaluate Lauricella's `FD`.  The methods `:closed_form`, `:series`, `:euler`,
+and `:pfaffian` use the product formula for `a = c`, the specialized
+total-degree recurrence, the Euler integral, and the explicit rank-`n+1`
+connection, respectively.  The `:auto` method selects among these methods
+before it starts the numerical calculation.  The `:generic` method uses the
+complete Horn-series engine.
+Set `return_diagnostics = true` to obtain a `LauricellaFDResult` in place of
+the scalar value.
+"""
+function lauricella_fd(
+    a,
+    b,
+    c,
+    x;
+    epsilon_order = nothing,
+    method::Symbol = :auto,
+    return_diagnostics::Bool = false,
+    kwargs...,
+)
+    started_ns = time_ns()
     length(x) == length(b) || throw(DimensionMismatch("x and b must have the same length"))
-    return _finish_predefined(_lauricella_fd_series(a, b, c), x; epsilon_order, kwargs...)
+    _check_lauricella_fd_method(method)
+    series = _lauricella_fd_series(a, b, c)
+    numeric_parameters = a isa Number && c isa Number && all(value -> value isa Number, b)
+    generic_frontend = !isnothing(epsilon_order) ||
+                       !numeric_parameters ||
+                       _has_epsilon(series) ||
+                       haskey(kwargs, :epsilon) ||
+                       (haskey(kwargs, :certified) && kwargs[:certified])
+    if method === :generic || (method === :auto && generic_frontend)
+        value = _finish_predefined(series, x; epsilon_order, kwargs...)
+        return return_diagnostics ?
+               _lauricella_fd_result(
+                   value,
+                   :generic,
+                   nothing,
+                   BigFloat(NaN),
+                   count(!iszero, x),
+                   started_ns,
+               ) : value
+    end
+    generic_frontend && throw(
+        ArgumentError(
+            "affine parameters, epsilon expansions, and certified evaluation require method = :generic or :auto",
+        ),
+    )
+    return _lauricella_fd_evaluate(
+        a,
+        b,
+        c,
+        x;
+        method,
+        return_diagnostics,
+        _started_ns = started_ns,
+        kwargs...,
+    )
 end
