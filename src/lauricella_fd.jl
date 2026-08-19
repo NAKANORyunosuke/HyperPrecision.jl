@@ -313,7 +313,7 @@ function _lauricella_fd_degree_estimate(x, digits::Int)
     radius >= 1 && return typemax(Int)
     exponent = ((digits + 14) * log(big(10)) + 8log(BigFloat(length(x) + 1))) /
                -log(radius)
-    return max(12, ceil(Int, exponent))
+    return _saturating_ceil_to_int(exponent; minimum = 12)
 end
 
 function _fd_nonpositive_integer_degree(value)
@@ -907,20 +907,25 @@ function _select_lauricella_fd_method(
     termination_degree = _lauricella_fd_termination_degree(a)
     if !isnothing(termination_degree) && termination_degree <= maximum_degree
         variables = max(length(x), 1)
-        work_per_variable = termination_degree > typemax(Int) - variables ?
-                            typemax(Int) : termination_degree + variables
-        termination_cost = work_per_variable > div(typemax(Int), variables) ?
-                           typemax(Int) : variables * work_per_variable
-        termination_cost <= series_cost_gate && return :series
+        termination_cost = _saturating_product(
+            _saturating_add(termination_degree, 1),
+            _saturating_add(termination_degree, _saturating_add(variables, 1)),
+        )
+        termination_cost != typemax(Int) && termination_cost <= series_cost_gate &&
+            return :series
     end
 
     estimate = _lauricella_fd_degree_estimate(x, digits)
     variables = max(length(x), 1)
-    work_per_variable = estimate > typemax(Int) - variables ? typemax(Int) :
-                        estimate + variables
-    estimated_cost = work_per_variable > div(typemax(Int), variables) ? typemax(Int) :
-                     variables * work_per_variable
-    if estimate <= maximum_degree && estimated_cost <= series_cost_gate
+    # The majorant convolution in `_lauricella_fd_series_vector` has quadratic
+    # degree cost. The remaining coefficient and derivative recurrences add
+    # O(nD+n^2) work.
+    estimated_cost = _saturating_product(
+        _saturating_add(estimate, 1),
+        _saturating_add(estimate, _saturating_add(variables, 1)),
+    )
+    if estimate != typemax(Int) && estimate <= maximum_degree &&
+       estimated_cost != typemax(Int) && estimated_cost <= series_cost_gate
         return :series
     end
     _lauricella_fd_euler_applicable(a, c, x) && return :euler

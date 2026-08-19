@@ -15,9 +15,6 @@ function _unit_weight(variables::Int, index::Int)
 end
 
 function _pfq_series(upper, lower)
-    length(upper) == length(lower) + 1 || throw(
-        ArgumentError("the implemented generalized function must have type pF(p-1)"),
-    )
     return HornSeries(
         upper,
         ones(Int, length(upper), 1),
@@ -248,83 +245,159 @@ function _finish_predefined(
 end
 
 function hypergeometric_pfq(upper, lower, argument; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(
-        _pfq_series(collect(upper), collect(lower)),
-        [argument];
+    return _pfq_frontend(upper, lower, argument; epsilon_order, kwargs...)
+end
+
+function hypergeometric_2f1(a, b, c, argument; epsilon_order = nothing, kwargs...)
+    return _pfq_frontend([a, b], [c], argument; epsilon_order, kwargs...)
+end
+
+function appell_f1(a, b1, b2, c, x, y; epsilon_order = nothing, kwargs...)
+    return _appell_f1_frontend(a, b1, b2, c, x, y; epsilon_order, kwargs...)
+end
+
+function appell_f2(a, b1, b2, c1, c2, x, y; epsilon_order = nothing, kwargs...)
+    return _lauricella_convolution_frontend(
+        :fa,
+        _appell_f2_series(a, b1, b2, c1, c2),
+        a,
+        [b1, b2],
+        [c1, c2],
+        [x, y];
         epsilon_order,
         kwargs...,
     )
 end
 
-function appell_f1(a, b1, b2, c, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_appell_f1_series(a, b1, b2, c), [x, y]; epsilon_order, kwargs...)
-end
-
-function appell_f2(a, b1, b2, c1, c2, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_appell_f2_series(a, b1, b2, c1, c2), [x, y]; epsilon_order, kwargs...)
-end
-
 function appell_f3(a1, a2, b1, b2, c, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_appell_f3_series(a1, a2, b1, b2, c), [x, y]; epsilon_order, kwargs...)
+    return _lauricella_convolution_frontend(
+        :fb,
+        _appell_f3_series(a1, a2, b1, b2, c),
+        [a1, a2],
+        [b1, b2],
+        c,
+        [x, y];
+        epsilon_order,
+        kwargs...,
+    )
 end
 
 function appell_f4(a, b, c1, c2, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_appell_f4_series(a, b, c1, c2), [x, y]; epsilon_order, kwargs...)
+    return _lauricella_convolution_frontend(
+        :fc,
+        _appell_f4_series(a, b, c1, c2),
+        a,
+        b,
+        [c1, c2],
+        [x, y];
+        epsilon_order,
+        kwargs...,
+    )
 end
 
 function horn_g1(a, b, c, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_horn_series(:G1, [a, b, c]), [x, y]; epsilon_order, kwargs...)
+    return _horn_frontend(_horn_series(:G1, [a, b, c]), [x, y]; epsilon_order, kwargs...)
 end
 
 function horn_g2(a, b, c, d, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_horn_series(:G2, [a, b, c, d]), [x, y]; epsilon_order, kwargs...)
+    return _horn_frontend(_horn_series(:G2, [a, b, c, d]), [x, y]; epsilon_order, kwargs...)
 end
 
 function horn_g3(a, b, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_horn_series(:G3, [a, b]), [x, y]; epsilon_order, kwargs...)
+    return _horn_frontend(_horn_series(:G3, [a, b]), [x, y]; epsilon_order, kwargs...)
 end
 
 function horn_h1(a, b, c, d, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_horn_series(:H1, [a, b, c, d]), [x, y]; epsilon_order, kwargs...)
+    return _horn_frontend(_horn_series(:H1, [a, b, c, d]), [x, y]; epsilon_order, kwargs...)
 end
 
 function horn_h2(a, b, c, d, e, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_horn_series(:H2, [a, b, c, d, e]), [x, y]; epsilon_order, kwargs...)
+    return _horn_frontend(_horn_series(:H2, [a, b, c, d, e]), [x, y]; epsilon_order, kwargs...)
 end
 
 function horn_h3(a, b, c, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_horn_series(:H3, [a, b, c]), [x, y]; epsilon_order, kwargs...)
+    return _horn_frontend(_horn_series(:H3, [a, b, c]), [x, y]; epsilon_order, kwargs...)
 end
 
 function horn_h4(a, b, c, d, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_horn_series(:H4, [a, b, c, d]), [x, y]; epsilon_order, kwargs...)
+    return _horn_frontend(_horn_series(:H4, [a, b, c, d]), [x, y]; epsilon_order, kwargs...)
 end
 
 function horn_h5(a, b, c, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_horn_series(:H5, [a, b, c]), [x, y]; epsilon_order, kwargs...)
+    return _horn_frontend(_horn_series(:H5, [a, b, c]), [x, y]; epsilon_order, kwargs...)
 end
 
 function horn_h6(a, b, c, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_horn_series(:H6, [a, b, c]), [x, y]; epsilon_order, kwargs...)
+    return _horn_frontend(_horn_series(:H6, [a, b, c]), [x, y]; epsilon_order, kwargs...)
 end
 
 function horn_h7(a, b, c, d, x, y; epsilon_order = nothing, kwargs...)
-    return _finish_predefined(_horn_series(:H7, [a, b, c, d]), [x, y]; epsilon_order, kwargs...)
+    return _horn_frontend(_horn_series(:H7, [a, b, c, d]), [x, y]; epsilon_order, kwargs...)
 end
 
 function lauricella_fa(a, b, c, x; epsilon_order = nothing, kwargs...)
     length(x) == length(b) || throw(DimensionMismatch("x and b must have the same length"))
-    return _finish_predefined(_lauricella_fa_series(a, b, c), x; epsilon_order, kwargs...)
+    length(x) == length(c) || throw(DimensionMismatch("x and c must have the same length"))
+    length(x) == 1 && return _pfq_frontend(
+        [a, first(b)],
+        [first(c)],
+        first(x);
+        epsilon_order,
+        kwargs...,
+    )
+    return _lauricella_convolution_frontend(
+        :fa,
+        _lauricella_fa_series(a, b, c),
+        a,
+        collect(b),
+        collect(c),
+        collect(x);
+        epsilon_order,
+        kwargs...,
+    )
 end
 
 function lauricella_fb(a, b, c, x; epsilon_order = nothing, kwargs...)
     length(x) == length(a) || throw(DimensionMismatch("x and a must have the same length"))
-    return _finish_predefined(_lauricella_fb_series(a, b, c), x; epsilon_order, kwargs...)
+    length(x) == length(b) || throw(DimensionMismatch("x and b must have the same length"))
+    length(x) == 1 && return _pfq_frontend(
+        [first(a), first(b)],
+        [c],
+        first(x);
+        epsilon_order,
+        kwargs...,
+    )
+    return _lauricella_convolution_frontend(
+        :fb,
+        _lauricella_fb_series(a, b, c),
+        collect(a),
+        collect(b),
+        c,
+        collect(x);
+        epsilon_order,
+        kwargs...,
+    )
 end
 
 function lauricella_fc(a, b, c, x; epsilon_order = nothing, kwargs...)
     length(x) == length(c) || throw(DimensionMismatch("x and c must have the same length"))
-    return _finish_predefined(_lauricella_fc_series(a, b, c), x; epsilon_order, kwargs...)
+    length(x) == 1 && return _pfq_frontend(
+        [a, b],
+        [first(c)],
+        first(x);
+        epsilon_order,
+        kwargs...,
+    )
+    return _lauricella_convolution_frontend(
+        :fc,
+        _lauricella_fc_series(a, b, c),
+        a,
+        b,
+        collect(c),
+        collect(x);
+        epsilon_order,
+        kwargs...,
+    )
 end
 
 """

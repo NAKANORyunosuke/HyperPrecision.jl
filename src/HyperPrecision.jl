@@ -11,6 +11,7 @@ export AffineParameter,
        CertifiedResult,
        UnsupportedError,
        HornSeries,
+       HypergeometricResult,
        LaurentExpansion,
        LauricellaFDResult,
        PfaffianSystem,
@@ -58,6 +59,7 @@ export AffineParameter,
        hyp_expand,
        hyp_function_expand,
        hypergeometric_pfq,
+       hypergeometric_2f1,
        appell_f1,
        appell_f2,
        appell_f3,
@@ -87,6 +89,7 @@ include("frobenius.jl")
 include("transport.jl")
 include("monodromy.jl")
 include("lauricella_fd.jl")
+include("hypergeometric_fast.jl")
 include("epsilon.jl")
 include("predefined.jl")
 

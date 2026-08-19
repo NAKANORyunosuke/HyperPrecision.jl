@@ -34,6 +34,9 @@ The package provides the following computations.
 9. It evaluates five parameter families by certified AGM-type mean iterations.
 10. It evaluates Lauricella `FD` by a total-degree recurrence, an Euler
     integral, or an explicit rank-`n+1` Pfaffian connection.
+11. It evaluates numerical `pFq`, Appell `F1`--`F4`, Lauricella `FA`--`FC`,
+    and Horn `G1`--`G3` and `H1`--`H7` by native recurrences in their selected
+    convergence regions.
 
 The predefined hypergeometric interfaces are `hypergeometric_pfq`,
 `appell_f1` through `appell_f4`, `horn_g1` through `horn_g3`, `horn_h1`
@@ -116,6 +119,111 @@ expansion.estimated_error
 
 The pole order is inferred from the affine Pochhammer parameters. The keyword
 `pole_order` overrides the inferred order.
+
+### General hypergeometric dispatch
+
+The numerical predefined functions accept `method = :auto`, `:series`,
+`:generic`, or `:pfaffian`. The default method selects a native recurrence in
+its convergence region. The method `:generic` retains the complete Horn-series
+frontend, and `:pfaffian` forces that frontend to continue the function by its
+Pfaffian connection. The scalar return type remains the default. We obtain a
+`HypergeometricResult` by setting `return_diagnostics = true`.
+
+```julia
+gauss = hypergeometric_2f1(
+    1//3,
+    2//5,
+    5//4,
+    big"0.25";
+    digits = 40,
+    derivatives = true,
+    return_diagnostics = true,
+)
+
+gauss.value
+gauss.derivatives
+gauss.method_used
+gauss.degree
+gauss.error_estimate
+```
+
+For `pFq`, we use the term recurrence
+
+```math
+t_{k+1}=t_k\frac{z}{k+1}\cdot
+\frac{\prod_{i=1}^{p}(a_i+k)}{\prod_{j=1}^{q}(b_j+k)},
+```
+
+where `t_k` is the term of degree `k`, `a_i` are the upper parameters, and
+`b_j` are the lower parameters. The native series is available for every
+finite `z` when `p <= q` and for `abs(z) < 1` when `p = q + 1`. A terminating
+upper parameter also permits the native series outside these regions. Equal
+upper and lower parameters are cancelled before a zero Pochhammer factor is
+tested. The same exact factor normalization is applied before generic
+summation and Pfaffian construction. Thus exact cancellation is distinguished
+from an uncancelled lower pole. When cancellation between numerical terms
+consumes working digits, the native recurrence repeats the sum at higher
+precisions and accepts two agreeing results. The zero-upper-parameter case is
+single-valued and always uses the first closed form below for an ordinary
+numeric call, even when the caller selects a numerical method or supplies a
+path. Explicit waypoints are still normalized and checked. The
+one-upper-parameter case uses the second closed form for a principal-germ call:
+
+```math
+{}_0F_0(z)=\exp(z),\qquad {}_1F_0(a;z)=(1-z)^{-a}.
+```
+
+These formulas also provide their first derivatives. An exact nonpositive
+integral value of `a` gives a path-independent terminating polynomial in the
+second formula. A nonintegral `a` with an explicit path retains Pfaffian
+transport and its monodromy about `z = 1`.
+
+We evaluate Appell `F1` as the two-variable Lauricella `FD`. We evaluate Appell
+`F2`, `F3`, and `F4` as the two-variable cases of Lauricella `FA`, `FB`, and
+`FC`, respectively. For `FA`, `FB`, and `FC`, we convolve one-variable
+coefficient arrays. The resulting cost is `O(n*D^2)` for `n` variables and
+total degree `D`; it does not enumerate all weak compositions. The native
+convergence tests use
+
+```math
+\sum_i |x_i|<1\quad(F_A),\qquad
+\max_i |x_i|<1\quad(F_B),\qquad
+\sum_i \sqrt{|x_i|}<1\quad(F_C).
+```
+
+If a lower parameter is close to a nonpositive integer, a short prefix can
+appear to converge before the recurrence crosses the nearby pole. The native
+`pFq`, Lauricella, and Horn kernels therefore require a degree beyond that pole
+and an additional convergence burn-in. They stop at the degree or cost gate
+instead of accepting the prefix. Automatic `pFq` evaluation does not replace a
+protected near-pole or precision-instability failure by generic summation or
+Pfaffian transport. A forced generic or Pfaffian `pFq` call is also rejected at
+such a lower parameter because its boundary series has no safe short-prefix
+certificate. Input-dependent precision guards are capped at 4096 decimal
+digits.
+
+The Horn `G` and `H` frontends use adjacent coefficient ratios on a triangular
+total-degree grid. Automatic Horn dispatch uses this grid only in the
+conservative region `max(abs(x), abs(y)) <= 0.05`. The forced series method can
+test another point by a doubled-degree comparison. A failed comparison stops
+at the degree or cost gate. An exact nonpositive integral upper factor with
+strictly positive weights provides a safe finite total-degree bound; this
+bound is honored even outside the conservative region. The evaluator checks
+its degree and operation gates before allocating the grid. It rejects an
+uncancelled exact lower pole unless the finite support is proved to end before
+the first zero denominator.
+
+For a native numerical series, the keyword `derivatives = true` returns all
+first argument derivatives with the scalar value. In a diagnostic call they
+are stored in `derivatives`. Without diagnostics the return value is the named
+tuple `(value, derivatives)`. The generic contour frontend does not infer
+derivatives; shifted functions must be evaluated explicitly along the same
+contour. The diagnostic `terms` field counts the recurrence or grid terms
+evaluated by the native call, including shifted calls used for derivatives.
+An explicit `branch_side` or `waypoints` request never selects a principal
+native series. It selects Pfaffian transport and retains the requested path.
+The distinct keyword `certified = true` retains the Arb enclosure frontend and
+returns `CertifiedResult`.
 
 ### Lauricella FD dispatch
 
@@ -470,6 +578,14 @@ reverse-path error, and monodromy invariants:
 julia --project=. benchmark/pfaffian_monodromy.jl
 ```
 
+The general dispatch benchmark records cold-process and warm-call times for
+`pFq`, Appell `F2`, Horn `H3`, and three-variable Lauricella `FA`. It compares
+`:auto`, `:series`, and `:generic` under common inputs and precision:
+
+```julia
+julia --project=. benchmark/hypergeometric_fast.jl
+```
+
 ## Numerical modes and guarantees
 
 The general Pfaffian and monodromy engine supports `mode = :fast`. This mode
@@ -495,6 +611,21 @@ raises `UnsupportedError`. Complex-ball restricted-root isolation, coefficient
 balls, ball-certified tail bounds, determinant exclusion, and certified group
 relations are not implemented. No midpoint result is labeled as a ball
 certificate.
+
+For a native calculation, `HypergeometricResult.error_estimate` includes the
+larger of the observed truncation or precision-rerun discrepancy and one unit
+at the requested decimal scale. This quantity is a heuristic a posteriori
+midpoint estimate, not a verified error bound or a ball enclosure. The value is
+`NaN` when a generic computation does not expose an estimate. The
+`convergence_test` field records the applicable native check, including
+`:ratio_majorant`, `:doubled_degree`, `:precision_rerun`, or
+`:exact_termination`.
+
+If direct generic summation reaches `maximum_series_terms`, the frontend
+estimates the Macaulay matrix work before it derives a Pfaffian system. It
+raises `ArgumentError` when this estimate exceeds `maximum_pfaffian_work`
+(5,000,000 by default). The caller can set `allow_expensive_pfaffian = true`
+only for an explicitly accepted large generic construction.
 
 The separate keyword `certified = true` is implemented for the following five
 real parameter families. It returns a `CertifiedResult` containing an Arb ball.
@@ -528,7 +659,9 @@ Every argument of these five certified evaluators must lie in `[0, 1)`. The
 endpoint `1` is excluded. Exact rational parameters select the parameter family
 without a parameter-identification tolerance. A call returns only when the Arb
 ball has the requested relative accuracy; otherwise it raises
-`CertificationError`. The examples are in
+`CertificationError`. The predefined frontends pass `maximum_degree` and
+`maximum_iterations` to the certified evaluator; nonpositive resource limits
+are rejected. The examples are in
 [`examples/certified_agm.jl`](examples/certified_agm.jl).
 
 ## Limitations
@@ -574,6 +707,11 @@ ball has the requested relative accuracy; otherwise it raises
 - A `Float64` argument denotes its stored binary value. Use a rational number or
   a decimal string parsed as `BigFloat` when the input must represent an exact
   decimal value.
+- Automatic Horn `G` and `H` native dispatch uses a conservative interior
+  radius rather than the full family-specific convergence domains. A point
+  outside this radius uses the generic frontend unless `method = :series` is
+  selected explicitly. No Laplace, Bessel, or Mellin--Barnes transformation is
+  enabled automatically.
 
 ## License and references
 

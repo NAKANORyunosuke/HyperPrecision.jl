@@ -97,13 +97,35 @@ function HornSeries(
     n, upper_rows = _weight_rows(upper_weights, length(upper_parameters), n_hint)
     n, lower_rows = _weight_rows(lower_weights, length(lower_parameters), n)
     n > 0 || throw(ArgumentError("a Horn series must have at least one variable"))
+    # Cancel only literally identical Pochhammer factors.  Performing this
+    # normalization on the symbolic input makes the defining series, its
+    # direct summation, and every subsequently derived Pfaffian system agree
+    # at removable singularities.
+    upper_affine = [_as_affine(parameter) for parameter in upper_parameters]
+    lower_affine = [_as_affine(parameter) for parameter in lower_parameters]
+    keep_upper = trues(length(upper_affine))
+    keep_lower = trues(length(lower_affine))
+    for upper_index in eachindex(upper_affine)
+        upper_parameter = upper_affine[upper_index]
+        lower_index = findfirst(eachindex(lower_affine)) do candidate_index
+            keep_lower[candidate_index] || return false
+            lower_parameter = lower_affine[candidate_index]
+            return upper_rows[upper_index] == lower_rows[candidate_index] &&
+                   upper_parameter.constant == lower_parameter.constant &&
+                   upper_parameter.slope == lower_parameter.slope
+        end
+        if !isnothing(lower_index)
+            keep_upper[upper_index] = false
+            keep_lower[lower_index] = false
+        end
+    end
     upper = PochhammerFactor{n}[
-        PochhammerFactor{n}(_as_affine(parameter), row)
-        for (parameter, row) in zip(upper_parameters, upper_rows)
+        PochhammerFactor{n}(parameter, row)
+        for (parameter, row, keep) in zip(upper_affine, upper_rows, keep_upper) if keep
     ]
     lower = PochhammerFactor{n}[
-        PochhammerFactor{n}(_as_affine(parameter), row)
-        for (parameter, row) in zip(lower_parameters, lower_rows)
+        PochhammerFactor{n}(parameter, row)
+        for (parameter, row, keep) in zip(lower_affine, lower_rows, keep_lower) if keep
     ]
     return HornSeries{n}(String(name), upper, lower)
 end

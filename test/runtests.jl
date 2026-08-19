@@ -89,6 +89,7 @@ end
 end
 
 include("lauricella_fd.jl")
+include("hypergeometric_fast.jl")
 
 @testset "Epsilon reconstruction" begin
     parameter = epsilon_parameter(1//3, 1)
@@ -181,6 +182,60 @@ end
         lower, upper = certified_interval(result)
         @test lower <= upper
     end
+    certified_zero_degree_calls = (
+        () -> hypergeometric_pfq(
+            [1//2, 1//2],
+            [1],
+            1//4;
+            certified = true,
+            maximum_degree = 0,
+        ),
+        () -> hypergeometric_pfq(
+            [1//3, 2//3],
+            [1],
+            1//4;
+            certified = true,
+            maximum_degree = 0,
+        ),
+        () -> hypergeometric_pfq(
+            [1//4, 3//4],
+            [1],
+            1//4;
+            certified = true,
+            maximum_degree = 0,
+        ),
+        () -> appell_f1(
+            1//3,
+            1//3,
+            1//3,
+            1,
+            1//10,
+            1//5;
+            certified = true,
+            maximum_degree = 0,
+        ),
+        () -> lauricella_fd(
+            1//4,
+            fill(1//4, 3),
+            1,
+            fill(1//5, 3);
+            certified = true,
+            maximum_degree = 0,
+        ),
+    )
+    for call in certified_zero_degree_calls
+        @test_throws ArgumentError call()
+    end
+    @test_throws ArgumentError appell_f1(
+        1//3,
+        1//3,
+        1//3,
+        1,
+        1//10,
+        1//5;
+        certified = true,
+        maximum_iterations = 0,
+    )
     @test !is_certified(reference_half)
 
     @test_throws CertificationError hypergeometric_pfq(

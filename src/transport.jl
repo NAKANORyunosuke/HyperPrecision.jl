@@ -275,7 +275,7 @@ function _default_stages(digits::Int)
 end
 
 """
-    transport_de(system, target; digits = system.digits, branch_side = -1)
+    transport_de(system, target; digits = system.digits, branch_side = nothing)
 
 Transport the Pfaffian basis vector from a point near the origin to `target`.
 The boundary vector is obtained by summing the defining Horn series.
@@ -284,7 +284,7 @@ function transport_de(
     system::PfaffianSystem{N,T},
     target;
     digits::Integer = system.digits,
-    branch_side::Integer = -1,
+    branch_side::Union{Nothing,Integer} = nothing,
     waypoints = nothing,
     solver::Symbol = :frobenius,
     frobenius_order::Union{Nothing,Integer} = nothing,
@@ -295,28 +295,34 @@ function transport_de(
     verbose::Bool = false,
 ) where {N,T}
     digits > 0 || throw(ArgumentError("digits must be positive"))
+    isnothing(branch_side) || branch_side in (-1, 0, 1) || throw(
+        ArgumentError("branch_side must be -1, 0, or 1"),
+    )
     return setprecision(BigFloat, system.bits) do
         numeric_target = T[_complex_big(value) for value in target]
         length(numeric_target) == N ||
             throw(DimensionMismatch("the target has the wrong length"))
 
-        direct, converged, _ = _direct_series_value(
-            system.series,
-            numeric_target;
-            digits = Int(digits),
-            maximum_degree = min(Int(maximum_degree), 180),
-            maximum_terms = Int(maximum_series_terms),
-        )
-        if converged
-            values, basis_converged, _ = _series_vector(
+        path_requested = !isnothing(branch_side) || !isnothing(waypoints)
+        if !path_requested
+            direct, converged, _ = _direct_series_value(
                 system.series,
                 numeric_target,
-                system.basis;
                 digits = Int(digits),
-                maximum_degree = Int(maximum_degree),
+                maximum_degree = min(Int(maximum_degree), 180),
                 maximum_terms = Int(maximum_series_terms),
             )
-            basis_converged && return values
+            if converged
+                values, basis_converged, _ = _series_vector(
+                    system.series,
+                    numeric_target,
+                    system.basis;
+                    digits = Int(digits),
+                    maximum_degree = Int(maximum_degree),
+                    maximum_terms = Int(maximum_series_terms),
+                )
+                basis_converged && return values
+            end
         end
 
         start, value = _boundary_series(
@@ -325,7 +331,8 @@ function transport_de(
             maximum_degree = Int(maximum_degree),
             maximum_terms = Int(maximum_series_terms),
         )
-        path = _normalise_waypoints(numeric_target, branch_side, waypoints)
+        effective_branch_side = isnothing(branch_side) ? -1 : Int(branch_side)
+        path = _normalise_waypoints(numeric_target, effective_branch_side, waypoints)
         solver in (:frobenius, :collocation) ||
             throw(ArgumentError("solver must be :frobenius or :collocation"))
         stage_count = isnothing(stages) ? _default_stages(Int(digits)) : Int(stages)
@@ -366,6 +373,21 @@ function transport_de(
     end
 end
 
+function _generic_pfaffian_work_estimate(
+    numeric::NumericHornSeries{N},
+    maximum_seed::Union{Nothing,Int},
+) where {N}
+    _, orders = _base_pdes(numeric)
+    maximum_basis_order = sum(max(order - 1, 0) for order in orders)
+    initial_seed = maximum_basis_order + (length(unique(orders)) == 1 ? 1 : 2)
+    final_seed = isnothing(maximum_seed) ? max(initial_seed + 4, 8) : maximum_seed
+    final_seed >= initial_seed || return typemax(Int)
+    columns = binomial(big(N + final_seed), big(N))
+    closures = max(big(N), 1) * columns
+    work = columns * closures
+    return work > typemax(Int) ? typemax(Int) : Int(work)
+end
+
 function transport_de(restricted::RestrictedPfaffianSystem; kwargs...)
     return transport_de(
         restricted.system,
@@ -382,7 +404,7 @@ function _chop_value(value::Complex{BigFloat}, digits::Int)
 end
 
 """
-    evaluate(series, target; digits = 50, epsilon = 0, branch_side = -1)
+    evaluate(series, target; digits = 50, epsilon = 0, branch_side = nothing)
 
 Evaluate a complete Horn-type series. The defining series is used in its
 convergence region. Outside that region, the function is transported by its
@@ -393,7 +415,7 @@ function evaluate(
     target;
     digits::Integer = 50,
     epsilon::Number = 0,
-    branch_side::Integer = -1,
+    branch_side::Union{Nothing,Integer} = nothing,
     waypoints = nothing,
     maximum_seed::Union{Nothing,Integer} = nothing,
     solver::Symbol = :frobenius,
@@ -401,12 +423,28 @@ function evaluate(
     stages::Union{Nothing,Integer} = nothing,
     maximum_degree::Integer = 260,
     maximum_series_terms::Integer = _DEFAULT_SERIES_TERM_BUDGET,
+    maximum_pfaffian_work::Integer = 5_000_000,
+    allow_expensive_pfaffian::Bool = false,
     maximum_steps::Integer = 20_000,
     verbose::Bool = false,
 ) where {N}
     digits > 0 || throw(ArgumentError("digits must be positive"))
+    digits <= typemax(Int) || throw(ArgumentError("digits is too large"))
+    maximum_degree >= 0 || throw(ArgumentError("maximum_degree must be nonnegative"))
+    maximum_degree <= typemax(Int) || throw(ArgumentError("maximum_degree is too large"))
+    maximum_series_terms > 0 || throw(ArgumentError("maximum_series_terms must be positive"))
+    maximum_series_terms <= typemax(Int) ||
+        throw(ArgumentError("maximum_series_terms is too large"))
+    maximum_pfaffian_work > 0 || throw(ArgumentError("maximum_pfaffian_work must be positive"))
+    maximum_pfaffian_work <= typemax(Int) ||
+        throw(ArgumentError("maximum_pfaffian_work is too large"))
+    isnothing(branch_side) || branch_side in (-1, 0, 1) || throw(
+        ArgumentError("branch_side must be -1, 0, or 1"),
+    )
     length(target) == N || throw(DimensionMismatch("the target has the wrong length"))
-    active = [index for index in 1:N if !iszero(target[index])]
+    path_requested = !isnothing(branch_side) || !isnothing(waypoints)
+    active = path_requested ? collect(1:N) :
+             [index for index in 1:N if !iszero(target[index])]
     isempty(active) && return BigFloat(1)
     restricted_series = _restrict_zero_variables(series, active)
     restricted_target = [target[index] for index in active]
@@ -417,7 +455,8 @@ function evaluate(
             throw(DimensionMismatch("a contour waypoint has the wrong length"))
         [[point[index] for index in active] for point in waypoints]
     end
-    working_digits = Int(digits) + 14
+    input_guard_digits = _horn_series_input_guard_digits(restricted_series, restricted_target)
+    working_digits = Int(digits) + 14 + input_guard_digits
     bits = _digits_to_bits(working_digits)
 
     return setprecision(BigFloat, bits) do
@@ -427,27 +466,42 @@ function evaluate(
             Complex{BigFloat},
         )
         numeric_target = Complex{BigFloat}[_complex_big(value) for value in restricted_target]
-        direct, converged, _ = _direct_series_value(
-            numeric,
-            numeric_target;
-            digits = working_digits,
-            maximum_degree = min(Int(maximum_degree), 180),
-            maximum_terms = Int(maximum_series_terms),
-        )
-        converged && return _chop_value(direct, Int(digits))
+        if !path_requested
+            direct, converged, _ = _direct_series_value(
+                numeric,
+                numeric_target;
+                digits = working_digits,
+                maximum_degree = min(Int(maximum_degree), 260),
+                maximum_terms = Int(maximum_series_terms),
+            )
+            converged && return _chop_value(direct, Int(digits))
+        end
+
+        requested_seed = isnothing(maximum_seed) ? nothing : Int(maximum_seed)
+        pfaffian_work = _generic_pfaffian_work_estimate(numeric, requested_seed)
+        if !allow_expensive_pfaffian && pfaffian_work > maximum_pfaffian_work
+            throw(
+                ArgumentError(
+                    "generic Pfaffian construction is estimated to require $pfaffian_work " *
+                    "matrix-work units, which exceeds maximum_pfaffian_work = " *
+                    "$(Int(maximum_pfaffian_work)); select a specialized frontend or set " *
+                    "allow_expensive_pfaffian = true explicitly",
+                ),
+            )
+        end
 
         system = _derive_pfaffian(
             numeric,
             bits,
             working_digits,
-            isnothing(maximum_seed) ? nothing : Int(maximum_seed),
+            requested_seed,
         )
         value = first(
             transport_de(
                 system,
                 numeric_target;
                 digits = Int(digits) + 4,
-                branch_side,
+                branch_side = isnothing(branch_side) ? -1 : Int(branch_side),
                 waypoints = restricted_waypoints,
                 solver,
                 frobenius_order,
