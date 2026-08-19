@@ -3,30 +3,44 @@
 [![CI](https://github.com/NAKANORyunosuke/HyperPrecision.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/NAKANORyunosuke/HyperPrecision.jl/actions/workflows/CI.yml)
 [![License: GPL-3.0-only](https://img.shields.io/badge/License-GPL--3.0--only-blue.svg)](LICENSE)
 
+## Overview
+
 `HyperPrecision.jl` evaluates complete Horn-type multivariate hypergeometric
 series with arbitrary precision at real or complex points. It implements the
-Pfaffian-transport method of Banik and Bera in Julia.
+Pfaffian-transport method of Banik and Bera in Julia. It also transports a full
+fundamental matrix along a piecewise-linear path and computes numerical
+monodromy matrices for based loops.
 
 This Julia port is maintained separately from the reference Mathematica
-implementation.
+implementation. It does not require Mathematica, FiniteFlow, or AMFlow.
 
-The package performs the following computations.
+## Features
 
-1. It obtains the neighbouring coefficient ratios of a Horn series.
-2. It generates the annihilating partial differential equations.
-3. It differentiates these equations and determines a finite derivative basis.
-4. It restricts the Pfaffian connection to a contour from the origin to the
-   target point.
-5. It transports the boundary vector by matching local Frobenius power series.
-6. It reconstructs a Laurent expansion from evaluations on an epsilon grid.
+The package provides the following computations.
 
-The Pfaffian solver uses `BigFloat` arithmetic and Julia's standard linear
-algebra library. Certified mean iterations use `Arb` ball arithmetic through
-Arblib.jl. The package does not require Mathematica, FiniteFlow, or AMFlow.
+1. It obtains neighbouring coefficient ratios of a Horn series.
+2. It generates annihilating partial differential equations and a full
+   multivariate Pfaffian connection.
+3. It extracts a numerical equation for the singular divisor from the selected
+   Macaulay pivot block.
+4. It constructs canonical and user-supplied piecewise-linear paths.
+5. It transports a particular solution or a full fundamental matrix by local
+   Taylor or Frobenius series.
+6. It stores local fundamental matrices in a
+   `FactorizedFundamentalTransport`.
+7. It constructs one-variable loops and multivariate meridians and returns a
+   `NumericalMonodromyRepresentation`.
+8. It reconstructs Laurent expansions from evaluations on an epsilon grid.
+9. It evaluates five parameter families by certified AGM-type mean iterations.
 
-## Installation
+The predefined hypergeometric interfaces are `hypergeometric_pfq`,
+`appell_f1` through `appell_f4`, `horn_g1` through `horn_g3`, `horn_h1`
+through `horn_h7`, and `lauricella_fa` through `lauricella_fd`.
 
-Start Julia in the repository root and activate the project.
+## Requirements and installation
+
+The package supports Julia 1.10 or later and Arblib.jl 1.x. Start Julia in the
+repository root and activate the project:
 
 ```julia
 using Pkg
@@ -36,122 +50,26 @@ Pkg.instantiate()
 using HyperPrecision
 ```
 
-## Fixed-parameter evaluation
+## Quick start
 
-The following evaluation lies outside the disk of convergence of the defining
-Gauss series:
+The following point lies outside the disk of convergence of the defining Gauss
+series:
 
 ```julia
 value = hypergeometric_pfq([1, 1], [2], big"-2"; digits = 40)
 
-# log(3) / 2
+# value = log(3) / 2
 ```
 
-The predefined interfaces are
-
-- `hypergeometric_pfq` for a function of type pF(p-1);
-- `appell_f1`, `appell_f2`, `appell_f3`, and `appell_f4`;
-- `horn_g1`, `horn_g2`, and `horn_g3`;
-- `horn_h1` through `horn_h7`;
-- `lauricella_fa`, `lauricella_fb`, `lauricella_fc`, and `lauricella_fd`.
-
-For example, the two-variable Lauricella function `FD` coincides with Appell's
-function `F1`:
-
-```julia
-x = [big"0.1", big"0.2"]
-
-left = appell_f1(1//2, 2//3, 3//4, 5//2, x[1], x[2]; digits = 30)
-right = lauricella_fd(1//2, [2//3, 3//4], 5//2, x; digits = 30)
-```
-
-## Certified AGM evaluation
-
-Set `certified = true` for a rigorous real-ball enclosure. The following call
-uses Gauss's arithmetic-geometric mean at an exact rational point close to the
-boundary:
-
-```julia
-edge = 1 - (big(1) // big(10)^50)
-
-result = hypergeometric_pfq(
-    [1//2, 1//2],
-    [1],
-    edge;
-    certified = true,
-    digits = 50,
-)
-
-result.enclosure
-result.method       # :gauss_agm
-result.iterations
-lower, upper = certified_interval(result)
-is_certified(result) # true
-```
-
-The certified dispatcher recognizes these exact parameter families:
-
-| Iteration | Function |
-| --- | --- |
-| Gauss | `2F1(1/2, 1/2; 1; z)` |
-| Borwein cubic | `2F1(1/3, 2/3; 1; z)` |
-| Borwein quadratic, signature four | `2F1(1/4, 3/4; 1; z)` |
-| Koike-Shiga | `F1(1/3; 1/3, 1/3; 1; x, y)` |
-| Kato-Matsumoto | `FD(1/4; 1/4, 1/4, 1/4; 1; x, y, z)` |
-
-Every argument must lie in `[0, 1)`. The endpoint `1` is excluded. Exact
-rational parameters such as `1//3` select the intended family without a
-parameter-identification tolerance.
-
-Gauss, the two Borwein iterations, and the Kato-Matsumoto iteration enclose the
-common limit between their current means. The Koike-Shiga evaluator applies
-two mean steps at a time and evaluates the transformed `F1` by an Arb series
-with a geometric majorant for the omitted tail. A call returns only when the
-ball has the requested relative accuracy; otherwise it raises
-`CertificationError`. The working precision also includes the binary exponent
-loss in `1 - z`, so exact rational arguments can be resolved even when they are
-much closer to `1` than the requested output accuracy.
-
-A `Float64` argument denotes its stored binary value. Use a rational number or
-a decimal string parsed as `BigFloat` when the input itself must represent an
-exact decimal value. The five boundary examples are available in
-[`examples/certified_agm.jl`](examples/certified_agm.jl).
-
-## Laurent expansion in epsilon
-
-An `AffineParameter(c, s)` represents `c + s * epsilon`. The example in
-Section 4.4 of the paper is computed as follows:
-
-```julia
-b2 = epsilon_parameter(1, 1)    # 1 + epsilon
-c2 = epsilon_parameter(-1, -1)  # -1 - epsilon
-
-expansion = appell_f2(
-    2, 3//2, b2, 4, c2, big"3", big(11)//3;
-    epsilon_order = 1,
-    digits = 10,
-)
-
-expansion[-1]
-expansion[0]
-expansion[1]
-expansion.estimated_error
-```
-
-The pole order is inferred from the affine Pochhammer parameters. The keyword
-`pole_order` overrides the inferred order.
-
-## A general Horn series
-
-We define
+A complete Horn series is defined by
 
 ```math
 F(x)=\sum_{m\in\mathbb N_0^n}
 \frac{\prod_r(a_r)_{\mu_r\cdot m}}
-     {\prod_s(b_s)_{\nu_s\cdot m}}\frac{x^m}{m!}.
+     {\prod_s(b_s)_{\nu_s\cdot m}}\frac{x^m}{m!},
 ```
 
-The rows of `upper_weights` are the vectors `mu_r`, and the rows of
+where the rows of `upper_weights` are the vectors `mu_r`, and the rows of
 `lower_weights` are the vectors `nu_s`.
 
 ```julia
@@ -166,32 +84,286 @@ series = HornSeries(
 orders = find_hypergeometric_order(series; digits = 40)
 system = find_pfaffian_system(series; digits = 40)
 rank = find_holonomic_rank(series; digits = 40)
-matrices = connection_matrices(system, [big"0.1", big"0.2"])
 value = evaluate(series, [big"3", big(11)//3]; digits = 30)
 ```
 
-The keyword `branch_side` is `-1` by default. The values `-1` and `1` select
-the two sides of a real singular locus. A list of complex contour points can be
-passed with the keyword `waypoints`.
+An `AffineParameter(c, s)` represents `c + s * epsilon`. The example in
+Section 4.4 of the HyperPrecision paper is computed by
 
-## Numerical solvers
+```julia
+b2 = epsilon_parameter(1, 1)
+c2 = epsilon_parameter(-1, -1)
 
-The default solver is `solver = :frobenius`. It constructs a power series for
-the restricted Pfaffian matrix at each regular contour point and matches the
-local solutions. The keyword `solver = :collocation` selects an arbitrary-
-precision Gauss collocation solver.
+expansion = appell_f2(
+    2,
+    3//2,
+    b2,
+    4,
+    c2,
+    big"3",
+    big(11)//3;
+    epsilon_order = 1,
+    digits = 10,
+)
 
-The derivative-basis reduction is numerical. Parameters on a resonant locus can
-change the holonomic rank or the selected derivative basis. Add an affine
-epsilon regulator or pass non-resonant parameters in this case. Evaluation at a
-target point on the singular locus is not implemented in version 0.2.0.
+expansion[-1]
+expansion[0]
+expansion[1]
+expansion.estimated_error
+```
 
-## Tests
+The pole order is inferred from the affine Pochhammer parameters. The keyword
+`pole_order` overrides the inferred order.
+
+## Full Pfaffian connection
+
+A `PfaffianSystem` stores the full multivariate Pfaffian connection
+
+```math
+\partial_{x_i}Y=\Omega_i(x)Y.
+```
+
+The function `connection_matrices(system, point)` evaluates all matrices
+`Omega_i` at `point`. Thus one `PfaffianSystem` can be restricted to several
+targets, piecewise-linear paths, and based loops. The function
+`check_integrability` checks the flatness equations by high-precision central
+differences.
+
+```julia
+gauss_series = HornSeries(
+    [1//3, 1//4],
+    reshape([1, 1], 2, 1),
+    [1//2],
+    reshape([1], 1, 1),
+)
+system = find_pfaffian_system(gauss_series; digits = 60)
+basepoint = choose_basepoint(system)
+omega = connection_matrices(system, basepoint)
+```
+
+Input B accepts a connection directly, without a Horn-series presentation.
+The callable returns one rational matrix for each variable. Every denominator
+component must be supplied as a callable singular factor together with its
+line-degree upper bound.
+
+```julia
+direct = UserPfaffianSystem(
+    [:x],
+    point -> [reshape([inv(point[1])], 1, 1)];
+    rank = 1,
+    connection_degree = 0,
+    connection_tail_bound = (center, direction, step, order) -> begin
+        ratio = abs(step * direction[1] / center[1])
+        ratio < 1 || return BigFloat(Inf)
+        ratio^(order + 1) / ((order + 1) * (1 - ratio))
+    end,
+    singular_factors = [:x => (point -> point[1])],
+    singular_degrees = [1],
+    digits = 50,
+    flatness = :check,
+)
+
+connection_matrices(direct, [1//5])
+restricted_singularities(direct, [-1], [1])
+```
+
+The `flatness` contract is `:check` or `:declared_flat`. In both cases,
+`monodromy` performs central-difference checks at the basepoint, every loop
+vertex, and three interior points of every edge, and rejects any failed sample.
+The representation records `method = :sampled_central_difference` and
+`status = :sampled_not_certified`; `:declared_flat` records an additional user
+assertion, not a bypass or proof. The direct connection uses a multiprecision
+Cauchy transform on two grids when `connection_degree` declares a conservative
+numerator line-degree bound. Fundamental transport rejects a direct system
+without this contract. A finite `connection_series` prefix is rejected because
+it carries no bound for omitted coefficients. The degree bound is a user
+assertion, not a certificate. A line with poles also requires
+`connection_tail_bound(center, direction, step, order)`, which bounds the
+integrated norm of all connection-series terms whose degree is at least
+`order`. The engine propagates this bound by a variation-of-constants
+majorant. On a polynomial line restriction, the engine obtains the corresponding
+bound from the recovered coefficients. Accepted patches also record an ODE
+residual evaluated through the original callable connection.
+
+The selected Macaulay pivot block gives a numerical equation for the singular
+divisor:
+
+```julia
+factor = only(singular_factors(system))
+factor(basepoint)
+roots = restricted_singularities(system, [0], [1])
+```
+
+The exposed `SingularFactor` is the determinant of the selected pivot block. It
+can be a product of irreducible factors with multiplicities. The function
+`restricted_singularities` restricts the determinant to a line and computes
+its roots by arbitrary-precision midpoint arithmetic. The implementation uses
+a multiprecision roots-of-unity transform, removes transform noise from every
+coefficient, performs approximate square-free factorization, and solves the
+factors without a `ComplexF64` companion matrix. Every returned root is checked
+against the reconstructed determinant polynomial. Multiplicities are retained.
+
+The function `find_restricted_pfaffian_system` retains the pre-restricted route
+for one fixed target. Path planning and monodromy use the full multivariate
+Pfaffian connection.
+
+## Path planning
+
+The function `plan_path` accepts the planner modes `:canonical`, `:safe_opt`,
+and `:fast_opt`. The canonical path changes coordinates in their given order
+and inserts deterministic complex detours when a restricted root meets a
+segment. The `:safe_opt` planner is a conservative no-op in this release:
+without interval verification of the full homotopy strip, it returns the
+canonical path unchanged and records `:not_certified_no_change`. The
+`:fast_opt` planner may remove waypoints after sampled checks and records
+`:sampled_fast_heuristic`. The default is `:canonical`.
+
+```julia
+start = [big"0.10"]
+target = [big"0.40"]
+
+canonical = plan_path(
+    system;
+    start,
+    target,
+    path_class = :principal,
+    mode = :canonical,
+)
+safe = plan_path(
+    system;
+    start,
+    target,
+    path_class = :principal,
+    mode = :safe_opt,
+)
+optimized = plan_path(
+    system;
+    start,
+    target,
+    path_class = :principal,
+    mode = :fast_opt,
+)
+custom = plan_path(
+    system;
+    start,
+    target,
+    path_class = :user,
+    waypoints = [[big"0.25" + big"0.08" * im]],
+)
+```
+
+The function `path_cost` returns the Euclidean length, the predicted number of
+Taylor disks, and the minimum restricted-root radius. A user path is rejected
+when a segment meets the numerical singular divisor.
+
+## Fundamental transport
+
+For a path `gamma`, the function `transport_fundamental` solves
+
+```math
+U'(t)=A_\gamma(t)U(t),\qquad U(0)=I,
+```
+
+where `A_gamma` is the full Pfaffian connection restricted to `gamma`. The
+Taylor recurrence generates all columns of `U` at the same time. Restricted
+determinant roots cap each local step.
+
+```julia
+transport = transport_fundamental(
+    system,
+    canonical;
+    digits = 40,
+    verify_reverse = true,
+)
+
+matrix = materialize(transport)
+base_vector = initial_vector(system, start)
+continued_vector = apply(transport, base_vector)
+inverse_transport = inv(transport)
+residual = transport.diagnostics.reverse_residual
+```
+
+The type `FactorizedFundamentalTransport` stores the local matrices in
+traversal order. Its `history` records the segment, local parameter, step,
+Taylor order, order-comparison error, differential-equation residual,
+restricted radius, condition number, and working precision. Its `diagnostics`
+records accepted and rejected steps, the accumulated error estimate, the
+maximum differential-equation residual, the reverse-path residual, condition
+numbers, and the precision history.
+
+The function `compose(first, second)` applies `first` and then `second`. The
+function `reverse_consistency(forward, backward)` returns
+`norm(T_backward * T_forward - I, 1)`. The inverse `inv(transport)` reverses the
+factor order and inverts each factor.
+
+The existing particular-solution interface `evaluate` uses the defining series
+inside its convergence region. Outside that region, it uses a boundary vector
+and either the Frobenius or collocation solver. The keyword `solver =
+:frobenius` is the default, and `solver = :collocation` selects an
+arbitrary-precision Gauss collocation solver.
+
+## Monodromy
+
+The function `meridian_generators` constructs a connector, a counterclockwise
+polygon in a transverse complex direction, and the reversed connector. The
+function `monodromy` transports the full fundamental matrix along each based
+loop.
+
+```julia
+specification = MeridianSpecification(
+    :x0,
+    [0],
+    [1];
+    radius = 1//20,
+)
+loops = meridian_generators(
+    system;
+    basepoint = [1//5],
+    components = [specification],
+    planner = :canonical,
+)
+rho = monodromy(system, loops; digits = 40, verify_reverse = true)
+M0 = monodromy_matrix(rho, :x0)
+M0_also = rho[:x0]
+```
+
+For a multivariate singular component, the point and transverse direction are
+vectors. For example, `MeridianSpecification(:x0, [0, y0], [1, 0])`
+constructs a meridian around the component `x = 0` at `(0, y0)`. When
+`components = :all`, the multivariate constructor samples the composite
+singular divisor on coordinate lines through the basepoint. A requested radius
+is reduced when its transverse disk would also contain another restricted
+singular root, and every edge of the resulting polygon is checked.
+For direct input with separately supplied factors, a specification is rejected
+when more than one factor vanishes at the component point. A composite factor
+does not provide enough information to certify that the point is smooth.
+
+The `NumericalMonodromyRepresentation` stores the basepoint, derivative basis,
+named loops, monodromy matrices, factorized transports, and verified numerical
+relations. It also stores the result of the numerical flatness check. The
+constructor rejects an empty generator set, open loops, distinct basepoints,
+duplicate labels, and a failed flatness check. The field
+`generator_set_complete` is `:unknown`, since sampled meridians need not give a
+presentation of the fundamental group. The example
+[`examples/gauss_monodromy.jl`](examples/gauss_monodromy.jl) reproduces the
+trace and determinant of the Gauss monodromy around `x = 0` for `c = 1/2`.
+
+## Tests and benchmarks
+
+Run the standard test suite by
 
 ```julia
 using Pkg
 Pkg.test()
 ```
+
+The monodromy regression tests cover full Pfaffian connections for Appell
+`F1`, `F2`, and `F3` and three-variable Lauricella `FD`. They also cover
+complex canonical and user paths, a Gauss `2F1` loop, an Appell `F3` meridian,
+reverse-path consistency, and canonical versus `fast_opt` transport. The Gauss
+root regression retains the roots `0, 0, 1` at both 40 and 80 decimal digits.
+The monodromy invariants are compared with the independent local exponents of
+Gauss `2F1` and Appell `F3`.
 
 The paper example is an extended test because it performs several independent
 high-precision transports:
@@ -201,7 +373,120 @@ $env:HYPERPRECISION_EXTENDED_TESTS = "true"
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-## License and provenance
+The dependency-free benchmark records representative evaluation time and
+error, full Pfaffian construction time, canonical and `fast_opt` step counts,
+reverse-path error, and monodromy invariants:
+
+```julia
+julia --project=. benchmark/pfaffian_monodromy.jl
+```
+
+## Numerical modes and guarantees
+
+The general Pfaffian and monodromy engine supports `mode = :fast`. This mode
+uses arbitrary-precision midpoint arithmetic, guard digits, a comparison of two
+Taylor truncation orders, restricted-root step caps, and an optional
+reverse-path consistency check. `TransportHistoryEntry` and
+`TransportDiagnostics` retain the data required to inspect each computation.
+The restricted-root solver uses BigFloat arithmetic throughout and checks a
+relative polynomial residual, but it does not produce isolating balls.
+
+`check_integrability` uses central differences with
+`h = 10^(-min(8, max(3, digits ÷ 4)))`. Horn-generated systems use the
+smoke-test threshold `sqrt(h)`. Direct callable systems use
+`max(100h^2, 10^(-(digits + 4)))`; monodromy applies that test to the basepoint,
+all loop vertices, and three edge-interior samples. Its return value records
+the method, residual, tolerance, and status. This sampled check can reject
+detected curvature, but it is not a symbolic identity test or a proof of
+flatness. A callable can have curvature that vanishes at every fixed sample, so
+the status remains `:sampled_not_certified` after a successful check.
+
+A call to `transport_fundamental` or `monodromy` with `mode = :certified`
+raises `UnsupportedError`. Complex-ball restricted-root isolation, coefficient
+balls, ball-certified tail bounds, determinant exclusion, and certified group
+relations are not implemented. No midpoint result is labeled as a ball
+certificate.
+
+The separate keyword `certified = true` is implemented for the following five
+real parameter families. It returns a `CertifiedResult` containing an Arb ball.
+
+| Iteration | Function |
+| --- | --- |
+| Gauss | `2F1(1/2, 1/2; 1; z)` |
+| Borwein cubic | `2F1(1/3, 2/3; 1; z)` |
+| Borwein quadratic, signature four | `2F1(1/4, 3/4; 1; z)` |
+| Koike-Shiga | `F1(1/3; 1/3, 1/3; 1; x, y)` |
+| Kato-Matsumoto | `FD(1/4; 1/4, 1/4, 1/4; 1; x, y, z)` |
+
+```julia
+edge = 1 - (big(1) // big(10)^50)
+result = hypergeometric_pfq(
+    [1//2, 1//2],
+    [1],
+    edge;
+    certified = true,
+    digits = 50,
+)
+
+result.enclosure
+result.method
+result.iterations
+lower, upper = certified_interval(result)
+is_certified(result)
+```
+
+Every argument of these five certified evaluators must lie in `[0, 1)`. The
+endpoint `1` is excluded. Exact rational parameters select the parameter family
+without a parameter-identification tolerance. A call returns only when the Arb
+ball has the requested relative accuracy; otherwise it raises
+`CertificationError`. The examples are in
+[`examples/certified_agm.jl`](examples/certified_agm.jl).
+
+## Limitations
+
+- The derivative-basis reduction uses numerical linear algebra. A resonant
+  parameter locus can change the holonomic rank or the selected derivative
+  basis. An affine epsilon regulator or non-resonant parameters are required in
+  this case.
+- The exposed singular divisor is a composite pivot determinant. Irreducible
+  multivariate factorization and certified root isolation are not implemented.
+- The `:safe_opt` planner leaves the canonical path unchanged because an
+  interval proof for a homotopy strip is not implemented. The `:fast_opt`
+  planner uses midpoint samples and does not implement PRM or A* candidate
+  graphs in this release.
+- Automatic multivariate meridians sample coordinate lines. The returned
+  generator set is not asserted to be complete. Separate direct-input factors
+  permit rejection of a point where several supplied components meet. The Horn
+  frontend exposes one composite pivot determinant, so smoothness at an
+  intersection cannot be certified without factorization.
+- Resonant Frobenius and Levelt bases, logarithmic local bases, braid-generator
+  constructors, invariant Hermitian forms, invariant bilinear forms, and a GKZ
+  frontend are not implemented.
+- Direct Pfaffian input accepts numerical callables rather than parsed symbolic
+  rational expressions. The caller must list every singular denominator
+  factor and a valid line-degree upper bound. Independent hold-out evaluations
+  reject detected reconstruction loss from severe factor scaling. Direct
+  transport additionally requires a conservative numerator line-degree bound
+  in `connection_degree`. A restricted line with poles also requires a
+  conservative `connection_tail_bound`. Missing and detected underdeclared
+  contracts raise `UnsupportedError`. A finite coefficient-prefix callback is
+  not accepted because it has no omitted-tail bound. These bounds are supplied
+  by the caller and are not independently certified.
+  Arbitrary black-box behavior between sampled points is not certified.
+  Omitting a pole invalidates path and step-safety assumptions. `initial_vector`
+  remains specific to the Horn-series frontend.
+- Evaluation and fundamental transport to a point on the singular divisor are
+  not implemented.
+- The requested fundamental-transport precision cannot exceed the precision
+  used to construct the `PfaffianSystem`. Rebuild the `PfaffianSystem` when a
+  higher precision is required. Fundamental transport does not retry with
+  automatically increased precision. The `precision_history` field records the
+  fixed working precision used by the current call.
+- A `Float64` argument denotes its stored binary value. Use a rational number or
+  a decimal string parsed as `BigFloat` when the input must represent an exact
+  decimal value.
+
+## License and references
 
 HyperPrecision.jl is distributed under version 3 of the GNU General Public
 License, with no option to use a later version. See [`LICENSE`](LICENSE).
@@ -212,40 +497,34 @@ not include the Mathematica source files. See [`NOTICE`](NOTICE) for the
 attribution and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the
 runtime dependencies.
 
-## Development disclosure
+OpenAI Codex contributed substantial portions of the Julia implementation,
+tests, and documentation. NAKANO Ryuosuke specified the mathematical scope,
+the five certified mean-iteration families, the boundary-testing criteria, and
+the licensing and release requirements. Validation compares the certified
+enclosures with a separate Arb zero-balanced-series evaluator.
 
-OpenAI Codex contributed substantial portions of the initial Julia
-implementation, tests, and documentation. NAKANO Ryuosuke specified the
-mathematical scope, the five certified mean-iteration families, the
-boundary-testing criteria, and the licensing and release requirements.
-Validation compares the certified enclosures with a separate Arb
-zero-balanced-series evaluator. The standard test suite runs on the oldest
-supported and latest stable Julia releases in CI, and its coverage report is
-recorded in the job summary and retained as a CI artifact for 90 days.
+References:
 
-## References
-
-- [S. Banik and S. Bera, *HyperPrecision: A Mathematica package for
+- S. Banik and S. Bera, [*HyperPrecision: A Mathematica package for
   High-Precision Numerical Evaluation of Multivariate Hypergeometric
   Functions*](https://doi.org/10.1016/j.cpc.2026.110328), *Computer Physics
   Communications* **328** (2026), 110328;
   [arXiv:2605.30216v2](https://arxiv.org/abs/2605.30216v2).
-- [J. M. Borwein, P. B. Borwein, and F. G. Garvan, *Hypergeometric Analogues
+- J. M. Borwein, P. B. Borwein, and F. G. Garvan, [*Hypergeometric Analogues
   of the Arithmetic-Geometric Mean
   Iteration*](https://doi.org/10.1007/BF01204654), *Constructive
-  Approximation* **9** (1993), 509–523.
-- [K. Koike and H. Shiga, *Isogeny formulas for the Picard modular form and a
+  Approximation* **9** (1993), 509--523.
+- K. Koike and H. Shiga, [*Isogeny formulas for the Picard modular form and a
   three terms arithmetic geometric
   mean*](https://doi.org/10.1016/j.jnt.2006.08.002), *Journal of Number
-  Theory* **124** (2007), 123–141.
-- [T. Kato and K. Matsumoto, *The Common Limit of a Quadruple Sequence and
-  the Hypergeometric Function FD of Three
+  Theory* **124** (2007), 123--141.
+- T. Kato and K. Matsumoto, [*The Common Limit of a Quadruple Sequence and the
+  Hypergeometric Function FD of Three
   Variables*](https://doi.org/10.1017/S0027763000009739), *Nagoya
-  Mathematical Journal* **195** (2009), 113–124.
-- [F. Johansson, *Arb: Efficient Arbitrary-Precision Midpoint-Radius Interval
-  Arithmetic*](https://doi.org/10.1109/TC.2017.2690633), *IEEE Transactions
-  on Computers* **66** (2017), no. 8, 1281–1292.
+  Mathematical Journal* **195** (2009), 113--124.
+- F. Johansson, [*Arb: Efficient Arbitrary-Precision Midpoint-Radius Interval
+  Arithmetic*](https://doi.org/10.1109/TC.2017.2690633), *IEEE Transactions on
+  Computers* **66** (2017), no. 8, 1281--1292.
 - [Arblib.jl documentation](https://kalmarek.github.io/Arblib.jl/stable/).
-- The reference Mathematica implementation is distributed under GNU GPL
-  version 3 at
-  <https://github.com/HyperPrecision/HyperPrecision>.
+- [HyperPrecision reference Mathematica
+  implementation](https://github.com/HyperPrecision/HyperPrecision).

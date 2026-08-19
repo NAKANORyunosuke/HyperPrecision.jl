@@ -455,11 +455,38 @@ function connection_matrices(system::PfaffianSystem{N,T}, point) where {N,T}
     end
 end
 
+function connection_matrices(system::UserPfaffianSystem{N,T}, point) where {N,T}
+    length(point) == N || throw(DimensionMismatch("the point has the wrong length"))
+    return setprecision(BigFloat, system.bits) do
+        numeric_point = T[_complex_big(value) for value in point]
+        raw = system.connection isa AbstractVector ?
+              [entry(numeric_point) for entry in system.connection] :
+              system.connection(numeric_point)
+        values = collect(raw)
+        length(values) == N || throw(
+            DimensionMismatch("the direct connection must return one matrix per variable"),
+        )
+        matrices = Matrix{T}[]
+        for value in values
+            size(value) == (system.rank, system.rank) || throw(
+                DimensionMismatch("a direct connection matrix has the wrong rank"),
+            )
+            matrix = Matrix{T}(undef, system.rank, system.rank)
+            for row in 1:system.rank, column in 1:system.rank
+                matrix[row, column] = convert(T, _complex_big(value[row, column]))
+            end
+            push!(matrices, matrix)
+        end
+        matrices
+    end
+end
+
 """
     check_integrability(system; point = nothing)
 
 Check the Frobenius compatibility condition by central differences. The return
-value contains `passed` and `residual` fields.
+value contains `passed`, `residual`, `tolerance`, and `method` fields. Direct
+systems also record their user-supplied flatness contract.
 """
 function check_integrability(
     system::PfaffianSystem{N,T};
@@ -492,7 +519,58 @@ function check_integrability(
             maximum_residual = max(maximum_residual, maximum(abs, residual; init = zero(BigFloat)))
         end
         tolerance = sqrt(h)
-        return (passed = maximum_residual <= tolerance, residual = maximum_residual)
+        return (
+            passed = maximum_residual <= tolerance,
+            residual = maximum_residual,
+            tolerance,
+            method = :central_difference,
+        )
+    end
+end
+
+function check_integrability(
+    system::UserPfaffianSystem{N,T};
+    point = nothing,
+) where {N,T}
+    return setprecision(BigFloat, system.bits) do
+        x = isnothing(point) ? choose_basepoint(system) : T[_complex_big(v) for v in point]
+        length(x) == N || throw(DimensionMismatch("the point has the wrong length"))
+        h = big(10.0)^(-min(8, max(3, system.digits ÷ 4)))
+        omega = connection_matrices(system, x)
+        maximum_residual = zero(BigFloat)
+        for i in 1:N, j in (i + 1):N
+            x_plus_j = copy(x)
+            x_minus_j = copy(x)
+            x_plus_i = copy(x)
+            x_minus_i = copy(x)
+            x_plus_j[j] += h
+            x_minus_j[j] -= h
+            x_plus_i[i] += h
+            x_minus_i[i] -= h
+            derivative_j_i = (
+                connection_matrices(system, x_plus_j)[i] -
+                connection_matrices(system, x_minus_j)[i]
+            ) / (2h)
+            derivative_i_j = (
+                connection_matrices(system, x_plus_i)[j] -
+                connection_matrices(system, x_minus_i)[j]
+            ) / (2h)
+            residual = derivative_j_i - derivative_i_j + omega[i] * omega[j] - omega[j] * omega[i]
+            maximum_residual = max(maximum_residual, maximum(abs, residual; init = zero(BigFloat)))
+        end
+        # Direct callables do not carry exact symbolic derivative data.  A
+        # central difference has O(h^2) truncation error, so use an explicit
+        # midpoint tolerance rather than the much looser Horn-system smoke-test
+        # threshold.  Monodromy additionally samples this check along loops.
+        tolerance = max(100h^2, big(10.0)^(-(system.digits + 4)))
+        return (
+            passed = maximum_residual <= tolerance,
+            residual = maximum_residual,
+            tolerance,
+            method = :central_difference,
+            status = :point_sample_not_certified,
+            contract = system.flatness_contract,
+        )
     end
 end
 

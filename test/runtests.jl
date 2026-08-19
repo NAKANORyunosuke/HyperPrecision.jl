@@ -4,6 +4,7 @@
 using HyperPrecision
 using Arblib
 using Aqua
+using LinearAlgebra
 using Test
 
 Aqua.test_all(HyperPrecision)
@@ -247,6 +248,8 @@ end
         @test Arblib.overlaps(first(fd_direct), fd_agm.enclosure)
     end
 end
+
+include("monodromy.jl")
 
 if lowercase(get(ENV, "HYPERPRECISION_EXTENDED_TESTS", "false")) == "true"
     include("paper_example.jl")
