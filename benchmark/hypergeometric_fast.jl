@@ -68,12 +68,17 @@ end
 
 if isempty(ARGS)
     cases = (:pfq, :f2, :horn_h3, :fa3)
-    benchmark_methods = (:auto, :series, :generic)
+    benchmark_methods = Dict(
+        :pfq => (:auto, :series, :arb, :generic),
+        :f2 => (:auto, :series, :generic),
+        :horn_h3 => (:auto, :series, :generic),
+        :fa3 => (:auto, :series, :generic),
+    )
     warm = Dict{Tuple{Symbol,Symbol},Float64}()
     cold = Dict{Tuple{Symbol,Symbol},Float64}()
     benchmark_values = Dict{Tuple{Symbol,Symbol},Any}()
 
-    for case in cases, method in benchmark_methods
+    for case in cases, method in benchmark_methods[case]
         benchmark_values[(case, method)] = benchmark_case(case, method)
         warm[(case, method)] = minimum_time(case, method)
         cold[(case, method)] = cold_time(case, method)
@@ -82,11 +87,12 @@ if isempty(ARGS)
     for case in cases
         oracle = benchmark_values[(case, :series)]
         scale = max(abs(oracle), one(BigFloat))
-        for method in benchmark_methods
+        for method in benchmark_methods[case]
             @assert abs(benchmark_values[(case, method)] - oracle) <= big"1e-15" * scale
         end
-        fastest_warm = min(warm[(case, :series)], warm[(case, :generic)])
-        fastest_cold = min(cold[(case, :series)], cold[(case, :generic)])
+        forced_methods = filter(!=(:auto), benchmark_methods[case])
+        fastest_warm = minimum(warm[(case, method)] for method in forced_methods)
+        fastest_cold = minimum(cold[(case, method)] for method in forced_methods)
         @assert warm[(case, :auto)] <= 1.25fastest_warm + 0.002
         @assert cold[(case, :auto)] <= 1.25fastest_cold + 2.0
         @assert warm[(case, :series)] <= 1.25warm[(case, :generic)] + 0.002
@@ -95,7 +101,7 @@ if isempty(ARGS)
     println("General hypergeometric dispatch benchmark")
     for case in cases
         println("case = ", case)
-        for method in benchmark_methods
+        for method in benchmark_methods[case]
             println(
                 "  ",
                 rpad(String(method), 8),

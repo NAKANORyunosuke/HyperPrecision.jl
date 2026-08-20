@@ -123,11 +123,15 @@ The pole order is inferred from the affine Pochhammer parameters. The keyword
 ### General hypergeometric dispatch
 
 The numerical predefined functions accept `method = :auto`, `:series`,
-`:generic`, or `:pfaffian`. The default method selects a native recurrence in
-its convergence region. The method `:generic` retains the complete Horn-series
-frontend, and `:pfaffian` forces that frontend to continue the function by its
-Pfaffian connection. The scalar return type remains the default. We obtain a
-`HypergeometricResult` by setting `return_diagnostics = true`.
+`:generic`, or `:pfaffian`. The `pFq` frontend also accepts `:arb`, which uses
+the existing Arblib dependency on the principal branch. The Appell `F1`
+frontend also accepts `:closed_form` and `:euler`, since it uses the specialized
+Lauricella `FD` portfolio. The default method selects a candidate before it
+starts the numerical kernel. The method `:generic` retains the complete
+Horn-series frontend, and `:pfaffian` forces that frontend to continue the
+function by its Pfaffian connection. The scalar return type remains the
+default. We obtain a `HypergeometricResult` by setting
+`return_diagnostics = true`.
 
 ```julia
 gauss = hypergeometric_2f1(
@@ -146,6 +150,28 @@ gauss.method_used
 gauss.degree
 gauss.error_estimate
 ```
+
+The diagnostic result records both the numerical value and the conditions of
+its computation. The fields `working_precision` and `working_digits` give the
+actual binary working precision and its decimal equivalent as reported by the
+selected kernel; they are not inferred from the precision of the returned
+object. The field `error_status`
+classifies the estimate as `:certified`, `:bounded`, `:a_posteriori`,
+`:rounded`, or `:unknown`. The fields `compressed_dimension`,
+`branch_provenance`, `path_provenance`, `path_class`, and `path_segments`
+record reductions and contour choices. The fields `work_degree` and
+`work_steps` record the available recurrence or transport work; `nothing`
+means that the selected kernel does not expose the quantity. These fields are
+additions to the existing result API.
+
+The generic frontend does not yet expose its actual recurrence degree,
+transport step count, history, or midpoint error estimate. Its diagnostics
+therefore use `nothing` for `work_degree` and `work_steps`, `NaN` for
+`error_estimate`, and `:unknown` for `error_status`. Explicit branch and
+waypoint requests remain recorded in the path fields. Without such a request,
+the generic engine may finish by direct summation or Pfaffian transport, and
+the unavailable internal choice remains `:unknown` rather than being inferred
+from the returned number.
 
 For `pFq`, we use the term recurrence
 
@@ -178,6 +204,15 @@ integral value of `a` gives a path-independent terminating polynomial in the
 second formula. A nonintegral `a` with an explicit path retains Pfaffian
 transport and its monodromy about `z = 1`.
 
+For a nonterminating numerical `pFq`, automatic dispatch compares the local
+series regime with Arblib's `acb_hypgeom_pfq` kernel. The Arblib kernel returns
+a complex ball. We accept its midpoint only when the ball radius reaches the
+requested accuracy, and we retain that radius in the error estimate. For
+`p = q + 1` on the real cut, `:arb` uses Arblib's principal-side convention.
+An explicit `branch_side` or `waypoints` request cannot select `:arb`; it retains
+the requested Pfaffian path. The near-pole guard is applied before either
+kernel is allocated.
+
 We evaluate Appell `F1` as the two-variable Lauricella `FD`. We evaluate Appell
 `F2`, `F3`, and `F4` as the two-variable cases of Lauricella `FA`, `FB`, and
 `FC`, respectively. For `FA`, `FB`, and `FC`, we convolve one-variable
@@ -203,9 +238,10 @@ certificate. Input-dependent precision guards are capped at 4096 decimal
 digits.
 
 The Horn `G` and `H` frontends use adjacent coefficient ratios on a triangular
-total-degree grid. Automatic Horn dispatch uses this grid only in the
-conservative region `max(abs(x), abs(y)) <= 0.05`. The forced series method can
-test another point by a doubled-degree comparison. A failed comparison stops
+total-degree grid. Automatic Horn dispatch uses this grid only in the strict
+interior region `max(abs(x), abs(y)) <= 0.10`. The degree and cell estimates
+are checked before the grid is allocated. The forced series method can test
+another point by a doubled-degree comparison. A failed comparison stops
 at the degree or cost gate. An exact nonpositive integral upper factor with
 strictly positive weights provides a safe finite total-degree bound; this
 bound is honored even outside the conservative region. The evaluator checks
@@ -219,7 +255,15 @@ are stored in `derivatives`. Without diagnostics the return value is the named
 tuple `(value, derivatives)`. The generic contour frontend does not infer
 derivatives; shifted functions must be evaluated explicitly along the same
 contour. The diagnostic `terms` field counts the recurrence or grid terms
-evaluated by the native call, including shifted calls used for derivatives.
+evaluated by the native call. When derivatives are requested, Appell `F1` and
+Lauricella `FD` obtain the value and all first derivatives from one recurrence
+or transport state instead of evaluating a separate shifted function for each
+variable. The current specialized `FD` series kernel also advances its
+derivative-basis recurrence for a scalar request, but it does not expose those
+components unless `derivatives = true`. Specialized Pfaffian transport always
+propagates its rank-`n+1` connection state and likewise exposes derivative
+components only on request. The scalar and derivative labels therefore
+distinguish public workloads and results, not all internal kernel work.
 An explicit `branch_side` or `waypoints` request never selects a principal
 native series. It selects Pfaffian transport and retains the requested path.
 The distinct keyword `certified = true` retains the Arb enclosure frontend and
@@ -230,20 +274,39 @@ returns `CertifiedResult`.
 The function `lauricella_fd` accepts `method = :auto`, `:closed_form`,
 `:series`, `:euler`, `:pfaffian`, or `:generic`. The default `:auto` method
 estimates the work before it starts a numerical method. It uses the product
-formula when `a = c`, the lower parameter is not a nonpositive integer, and the
-arguments avoid the principal branch cut. It uses a total-degree coefficient
-recurrence in the convergence polydisk, the one-dimensional Euler integral when
-its parameter and branch conditions hold, and the explicit Pfaffian connection
-in the remaining regular cases. A nonpositive integral `a` selects its finite
-total-degree series even outside the convergence polydisk. If an automatically
-selected Euler
-quadrature does not converge, evaluation continues with the Pfaffian method at
-a regular target. The `:auto` method does not enumerate weak compositions. The
-`:generic` method retains the general Horn-series route for compatibility and
-must be selected explicitly when the specialized methods do not apply. The
-general Horn-series engine also stops direct enumeration after
+formula when `a = c` and no contour is requested. Exact cancellation of this
+common parameter precedes the lower-pole guard, including the case in which
+`a = c` is a nonpositive integer. An explicit branch or waypoint request keeps
+the contour and evaluates the product through continuously transported
+logarithms. It does not replace the requested path by the principal product.
+The remaining portfolio uses a total-degree coefficient recurrence in the
+convergence polydisk, the one-dimensional Euler integral when its parameter
+and branch conditions hold, and the explicit Pfaffian connection in regular
+exterior cases. A nonpositive integral `a` selects its finite total-degree
+series outside the convergence polydisk when it was not cancelled with `c`.
+If an automatically selected Euler quadrature does not converge, evaluation
+continues with the Pfaffian method at a regular target. The `:auto` method does
+not enumerate weak compositions. The `:generic` method retains the general
+Horn-series route for compatibility and must be selected explicitly when the
+specialized methods do not apply. The general Horn-series engine also stops
+direct enumeration after
 `maximum_series_terms` cumulative terms (250,000 by default) before it tries
 Pfaffian transport.
+
+The default resource portfolio permits total degree 1,200 and 2,000,000
+estimated series operations. Within these gates, the dispatcher uses a
+precision-dependent crossover between the quadratic total-degree recurrence
+and Euler quadrature. For example, the crossover retains the series for the
+three-variable radius-0.6 cases at 50 and 100 decimal digits, while it selects
+Euler quadrature near radius 0.95. A caller-supplied lower degree or operation
+gate remains authoritative.
+
+Generic Pfaffian construction uses a thread-safe cache with eight entries.
+The cache key contains every normalized numerical factor, its weight vector,
+the working precision, and the prolongation seed. The Macaulay-work gate is
+checked before a cached system is used. Thus a cached entry cannot bypass a
+stricter resource request. The cache stores no function value and does not
+replace a numerical transport by a lookup.
 
 ```julia
 a = 1//4
@@ -256,25 +319,36 @@ check = lauricella_fd(a, b, c, x; digits = 30, method = :euler)
 details = lauricella_fd(a, b, c, x; digits = 30, return_diagnostics = true)
 ```
 
-The opt-in `LauricellaFDResult` stores `value`, `method_used`, `degree`,
-`error_estimate`, `elapsed_seconds`, `compressed_dimension`, and
-`convergence_test`. Thus an
-automatic call and a forced-method call can be compared under the same input
-conditions without changing the scalar-returning default API. The field
-`error_estimate` is an a posteriori numerical estimate, not a ball enclosure;
-the `:generic` result uses `NaN` when the general engine does not expose an
-estimate. The field `degree` is `nothing` for a non-series method. Without an
-explicit contour, zero arguments are removed and coincident arguments are
-merged by adding their corresponding `b_i`; `compressed_dimension` records the
-resulting number of variables. Compression is performed on the original input
-objects. The working precision is increased when large parameters or nearby
-arguments indicate a potential loss from cancellation.
+The opt-in `LauricellaFDResult` follows the common diagnostic schema described
+above and also stores the selected method, convergence test, elapsed kernel
+time, and optional derivative vector. An automatic call and a forced-method
+call can therefore be compared without changing the scalar-returning default
+API. The field `error_estimate` is a midpoint estimate for the specialized
+methods; a generic result uses `NaN` and `error_status = :unknown` when the
+general engine exposes no estimate. The field `degree` is `nothing` for a
+non-series method. Without an explicit contour, zero arguments are removed
+and coincident arguments are merged by adding their corresponding `b_i`;
+`compressed_dimension` records the resulting number of variables. Compression
+is performed on the original input objects. Native `pFq`, Appell, Lauricella,
+and Horn kernels, together with generic summation and Pfaffian transport, set
+their working precision to at least the precision carried by pre-existing
+`BigFloat` and complex `BigFloat` parameters, coordinates, epsilon values, and
+waypoints, even when `digits` requests fewer digits.
 
 The specialized series accepts a truncation after an absolute-parameter
 majorant bounds its omitted tail. When signed parameters make this majorant
 inconclusive, it compares two fixed total degrees and repeats the calculation
 at increasing working precisions. The field `convergence_test` is `:majorant`
 or `:doubled_degree` for these two cases.
+
+The keyword `derivatives = true` returns the value and every first derivative
+with respect to the arguments. A derivative request reuses one vector state in
+the specialized series, Euler, and Pfaffian methods. The current specialized
+series shares its derivative-basis recurrence with scalar and diagnostics-only
+calls; such calls leave the public `derivatives` field equal to `nothing`.
+Euler quadrature uses its scalar integrand when derivatives are not requested.
+Pfaffian transport still propagates the complete connection state required by
+its coupled system and returns only its value component for a scalar call.
 
 For `a = c`, the automatically selected closed form is
 
@@ -586,6 +660,51 @@ The general dispatch benchmark records cold-process and warm-call times for
 julia --project=. benchmark/hypergeometric_fast.jl
 ```
 
+The representative production portfolio runs 36 dispatch cases at 15, 50,
+and 100 decimal digits. It separates process loading, method compilation, and
+warm calls. It also compares scalar and derivative requests and reports
+generic Pfaffian construction, cache lookup, and transport separately. This
+regression portfolio is not an exhaustive Phase 3 matrix over every family,
+method, parameter regime, and resource limit. Its scalar and derivative labels
+describe requested outputs; an `FD` series scalar measurement includes the
+shared derivative-basis recurrence described above, and a Pfaffian scalar
+measurement includes the coupled rank-state transport.
+
+```julia
+julia --project=. benchmark/production_dispatch.jl
+```
+
+For each applicable case, the benchmark requires
+`time(auto) <= 1.25 * time(fastest forced method) + timer floor` under identical
+inputs, precision, derivatives, path, and diagnostics. A compilation preflight
+precedes the warm portfolio. The benchmark measures and verifies the first
+call of every forced candidate. If this probe exceeds five seconds, the
+benchmark records `long_candidate_one_sample` and does not repeat that
+candidate. The candidate remains in the fastest-method comparison. If a
+one-sample candidate is provisionally fastest, the same run performs at least
+five interleaved paired warm measurements, repeats the component, derivative,
+shifted-oracle, and error-coverage checks, and records
+`long_candidate_five_paired`. It then recomputes the fastest candidate. A long
+candidate that is not provisionally fastest retains its complete first
+sample. The benchmark does not skip a candidate by extrapolating a
+lower-precision time.
+
+For a shorter candidate, the benchmark reports the median of five warm
+samples. The final gate uses five interleaved paired samples of `:auto` and the
+fastest forced method. In a derivative case, the benchmark compares the value,
+the derivative count, and every derivative component. It also evaluates the
+shifted-function identities at 30 additional decimal digits and checks that
+the reported error estimates cover the observed discrepancies.
+
+The timing comparison does not assert a pointwise speedup over every revision
+or extrapolate beyond the representative cases.
+On the review machine, the three-variable `FD` cases of radii 0.8 and 0.95
+were 10--15 percent slower than the corresponding `main` calls in some runs;
+both revisions selected Euler quadrature. These cases satisfy the within-tree
+1.25 gate. The dispatch changes remove the measured multi-fold regressions in
+the interior and seven-variable cases while retaining this bounded Euler-case
+tradeoff.
+
 ## Numerical modes and guarantees
 
 The general Pfaffian and monodromy engine supports `mode = :fast`. This mode
@@ -612,14 +731,24 @@ balls, ball-certified tail bounds, determinant exclusion, and certified group
 relations are not implemented. No midpoint result is labeled as a ball
 certificate.
 
-For a native calculation, `HypergeometricResult.error_estimate` includes the
-larger of the observed truncation or precision-rerun discrepancy and one unit
-at the requested decimal scale. This quantity is a heuristic a posteriori
-midpoint estimate, not a verified error bound or a ball enclosure. The value is
-`NaN` when a generic computation does not expose an estimate. The
+For a midpoint native calculation, `HypergeometricResult.error_estimate`
+includes the larger of the observed truncation or precision-rerun discrepancy
+and one unit at the requested decimal scale. This quantity is a heuristic a
+posteriori midpoint estimate, not a verified error bound or a ball enclosure.
+The value is `NaN` when a generic computation does not expose an estimate. The
 `convergence_test` field records the applicable native check, including
 `:ratio_majorant`, `:doubled_degree`, `:precision_rerun`, or
-`:exact_termination`.
+`:exact_termination`. A `pFq` result with `method_used = :arb` instead records
+`:ball_enclosure`; its estimate contains the Arblib ball radius and midpoint
+conversion allowance. Native ratio-majorant, absolute-majorant,
+doubled-degree, and precision-rerun results have
+`error_status = :a_posteriori`, since their reported total error remains a
+midpoint estimate rather than a rigorous enclosure. An accepted Arblib
+midpoint has `error_status = :bounded`. A certified diagnostic result has
+`error_status = :certified`; its error estimate is at least the radius from the
+enclosure midpoint to either endpoint. It is therefore nonzero whenever the
+returned enclosure has nonzero width. Exact reductions evaluated in midpoint
+arithmetic have `error_status = :rounded` and retain `certified = false`.
 
 If direct generic summation reaches `maximum_series_terms`, the frontend
 estimates the Macaulay matrix work before it derives a Pfaffian system. It

@@ -402,14 +402,15 @@ end
 
 """
     lauricella_fd(a, b, c, x; method = :auto, digits = 50,
-                  return_diagnostics = false)
+                  derivatives = false, return_diagnostics = false)
 
-Evaluate Lauricella's `FD`.  The methods `:closed_form`, `:series`, `:euler`,
+Evaluate Lauricella's `FD`. The methods `:closed_form`, `:series`, `:euler`,
 and `:pfaffian` use the product formula for `a = c`, the specialized
 total-degree recurrence, the Euler integral, and the explicit rank-`n+1`
-connection, respectively.  The `:auto` method selects among these methods
-before it starts the numerical calculation.  The `:generic` method uses the
-complete Horn-series engine.
+connection, respectively. The `:auto` method selects among these methods
+before it starts the numerical calculation. The `:generic` method uses the
+complete Horn-series engine. Set `derivatives = true` to return every first
+argument derivative with the value.
 Set `return_diagnostics = true` to obtain a `LauricellaFDResult` in place of
 the scalar value.
 """
@@ -421,6 +422,8 @@ function lauricella_fd(
     epsilon_order = nothing,
     method::Symbol = :auto,
     return_diagnostics::Bool = false,
+    derivatives::Bool = false,
+    _derivative_sink = nothing,
     kwargs...,
 )
     started_ns = time_ns()
@@ -434,30 +437,83 @@ function lauricella_fd(
                        haskey(kwargs, :epsilon) ||
                        (haskey(kwargs, :certified) && kwargs[:certified])
     if method === :generic || (method === :auto && generic_frontend)
-        value = _finish_predefined(series, x; epsilon_order, kwargs...)
-        return return_diagnostics ?
-               _lauricella_fd_result(
-                   value,
-                   :generic,
-                   nothing,
-                   BigFloat(NaN),
-                   count(!iszero, x),
-                   started_ns,
-               ) : value
+        derivatives && throw(
+            ArgumentError(
+                "first derivatives are unavailable from the generic Lauricella FD frontend",
+            ),
+        )
+        certified = haskey(kwargs, :certified) && kwargs[:certified]
+        epsilon_value = haskey(kwargs, :epsilon) ? kwargs[:epsilon] : nothing
+        source_precision = _source_precision_bits((a, b, c, x, epsilon_value))
+        precision_sink = Ref{Any}(nothing)
+        value = if certified
+            _finish_predefined(series, x; epsilon_order, kwargs...)
+        else
+            _finish_predefined(
+                series,
+                x;
+                epsilon_order,
+                _minimum_working_precision = source_precision,
+                _precision_sink = precision_sink,
+                kwargs...,
+            )
+        end
+        if return_diagnostics
+            precision_metadata = if certified
+                (
+                    working_precision = value.working_bits,
+                    working_digits = _bits_to_digits(value.working_bits),
+                )
+            else
+                isnothing(precision_sink[]) && error(
+                    "internal error: generic Lauricella FD evaluation did not report its working precision",
+                )
+                precision_sink[]
+            end
+            path_metadata = certified ?
+                            (
+                                branch_provenance = :principal,
+                                path_provenance = :certified_enclosure,
+                                path_class = :principal,
+                                path_segments = 0,
+                            ) : _predefined_path_diagnostics(kwargs, collect(x))
+            path_requested = _predefined_path_requested(kwargs)
+            error_estimate = certified ? _certified_error_radius(value) : BigFloat(NaN)
+            return _lauricella_fd_result(
+                value,
+                certified ? :certified : :generic,
+                nothing,
+                error_estimate,
+                path_requested ? length(x) : count(!iszero, x),
+                started_ns;
+                certified,
+                working_precision = precision_metadata.working_precision,
+                working_digits = precision_metadata.working_digits,
+                error_status = certified ? :certified : :unknown,
+                path_metadata...,
+                work_degree = nothing,
+                work_steps = nothing,
+            )
+        end
+        return value
     end
     generic_frontend && throw(
         ArgumentError(
             "affine parameters, epsilon expansions, and certified evaluation require method = :generic or :auto",
         ),
     )
-    return _lauricella_fd_evaluate(
+    derivative_sink = derivatives ? Ref{Any}(nothing) : _derivative_sink
+    details = _lauricella_fd_evaluate(
         a,
         b,
         c,
         x;
         method,
-        return_diagnostics,
+        return_diagnostics = return_diagnostics || derivatives,
+        _derivative_sink = derivative_sink,
         _started_ns = started_ns,
         kwargs...,
     )
+    return return_diagnostics ? details :
+           derivatives ? (value = details.value, derivatives = details.derivatives) : details
 end

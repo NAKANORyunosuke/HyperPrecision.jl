@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 const _PREDEFINED_FAST_METHODS = (:auto, :series, :generic, :pfaffian)
+const _PFQ_FAST_METHODS = (:auto, :series, :arb, :generic, :pfaffian)
+const _APPELL_F1_FAST_METHODS =
+    (:auto, :closed_form, :series, :euler, :generic, :pfaffian)
 const _MAX_PREDEFINED_GUARD_DIGITS = 4096
 
 """
@@ -10,7 +13,9 @@ const _MAX_PREDEFINED_GUARD_DIGITS = 4096
 Store the diagnostics from a predefined hypergeometric evaluation. The
 `derivatives` field is `nothing` unless first derivatives were requested.
 The certified frontend remains distinct: in that case `value` is a
-`CertifiedResult` and `certified` is `true`.
+`CertifiedResult` and `certified` is `true`. The remaining fields record the
+working precision, error provenance, dimension reduction, and branch and path
+provenance.
 """
 struct HypergeometricResult{T,D}
     value::T
@@ -22,6 +27,51 @@ struct HypergeometricResult{T,D}
     elapsed_seconds::Float64
     convergence_test::Union{Nothing,Symbol}
     certified::Bool
+    working_precision::Int
+    working_digits::Int
+    error_status::Symbol
+    compressed_dimension::Int
+    branch_provenance::Symbol
+    path_provenance::Symbol
+    path_class::Symbol
+    path_segments::Union{Nothing,Int}
+    work_degree::Union{Nothing,Int}
+    work_steps::Union{Nothing,Int}
+end
+
+function HypergeometricResult(
+    value,
+    derivatives,
+    method_used::Symbol,
+    degree,
+    terms::Integer,
+    error_estimate,
+    elapsed_seconds::Real,
+    convergence_test,
+    certified::Bool,
+)
+    working_precision = _diagnostic_precision_bits(value, derivatives)
+    return HypergeometricResult(
+        value,
+        derivatives,
+        method_used,
+        isnothing(degree) ? nothing : Int(degree),
+        Int(terms),
+        BigFloat(error_estimate),
+        Float64(elapsed_seconds),
+        convergence_test,
+        certified,
+        working_precision,
+        _bits_to_digits(working_precision),
+        _diagnostic_error_status(error_estimate, convergence_test; certified),
+        isnothing(derivatives) ? 1 : max(length(derivatives), 1),
+        :automatic,
+        :unknown,
+        :principal,
+        nothing,
+        isnothing(degree) ? nothing : Int(degree),
+        terms > 0 ? Int(terms) : nothing,
+    )
 end
 
 is_certified(result::HypergeometricResult) =
@@ -52,7 +102,25 @@ function _hypergeometric_result(
     started_ns::UInt64;
     convergence_test::Union{Nothing,Symbol} = nothing,
     certified::Bool = false,
+    working_precision::Union{Nothing,Integer} = nothing,
+    working_digits::Union{Nothing,Integer} = nothing,
+    error_status::Union{Nothing,Symbol} = nothing,
+    compressed_dimension::Integer = isnothing(derivatives) ? 1 : max(length(derivatives), 1),
+    branch_provenance::Symbol = :automatic,
+    path_provenance::Symbol = :unknown,
+    path_class::Symbol = :principal,
+    path_segments::Union{Nothing,Integer} = nothing,
+    work_degree = degree,
+    work_steps::Union{Nothing,Integer} = terms > 0 ? Int(terms) : nothing,
 )
+    precision_bits = isnothing(working_precision) ?
+                     _diagnostic_precision_bits(value, derivatives) :
+                     Int(working_precision)
+    precision_digits = isnothing(working_digits) ?
+                       _bits_to_digits(precision_bits) : Int(working_digits)
+    status = isnothing(error_status) ?
+             _diagnostic_error_status(error_estimate, convergence_test; certified) :
+             error_status
     return HypergeometricResult(
         value,
         derivatives,
@@ -63,12 +131,38 @@ function _hypergeometric_result(
         Float64((time_ns() - started_ns) / 1.0e9),
         convergence_test,
         certified,
+        precision_bits,
+        precision_digits,
+        status,
+        Int(compressed_dimension),
+        branch_provenance,
+        path_provenance,
+        path_class,
+        isnothing(path_segments) ? nothing : Int(path_segments),
+        isnothing(work_degree) ? nothing : Int(work_degree),
+        isnothing(work_steps) ? nothing : Int(work_steps),
     )
 end
 
 function _check_predefined_fast_method(method::Symbol)
     method in _PREDEFINED_FAST_METHODS || throw(
         ArgumentError("method must be :auto, :series, :generic, or :pfaffian"),
+    )
+    return method
+end
+
+function _check_pfq_fast_method(method::Symbol)
+    method in _PFQ_FAST_METHODS || throw(
+        ArgumentError("pFq method must be :auto, :series, :arb, :generic, or :pfaffian"),
+    )
+    return method
+end
+
+function _check_appell_f1_fast_method(method::Symbol)
+    method in _APPELL_F1_FAST_METHODS || throw(
+        ArgumentError(
+            "Appell F1 method must be :auto, :closed_form, :series, :euler, :generic, or :pfaffian",
+        ),
     )
     return method
 end
@@ -132,10 +226,7 @@ function _termination_degree(parameters)
 end
 
 function _input_precision_bits(value)
-    bits = 256
-    real(value) isa BigFloat && (bits = max(bits, precision(real(value))))
-    imag(value) isa BigFloat && (bits = max(bits, precision(imag(value))))
-    return bits
+    return max(256, _source_precision_bits(value))
 end
 
 function _parameter_guard_data(value)
@@ -303,6 +394,48 @@ function _output_rounding_allowance(value, derivatives, digits::Int)
     return big(10.0)^(-digits) * scale
 end
 
+function _certified_error_radius(result::CertifiedResult)
+    lower, upper = certified_interval(result)
+    midpoint = (lower + upper) / 2
+    return max(abs(midpoint - lower), abs(upper - midpoint))
+end
+
+function _predefined_path_diagnostics(options, target)
+    branch_requested = haskey(options, :branch_side) &&
+                       !isnothing(options[:branch_side])
+    waypoint_requested = haskey(options, :waypoints) &&
+                         !isnothing(options[:waypoints])
+    if !branch_requested && !waypoint_requested
+        return (
+            branch_provenance = :automatic,
+            path_provenance = :automatic,
+            path_class = :unknown,
+            path_segments = nothing,
+        )
+    end
+    effective_branch = branch_requested ? Int(options[:branch_side]) : -1
+    requested_waypoints = waypoint_requested ? options[:waypoints] : nothing
+    source_values = Any[target...]
+    isnothing(requested_waypoints) ||
+        foreach(point -> append!(source_values, point), requested_waypoints)
+    bits = max(256, _maximum_source_precision_bits(source_values))
+    segments = setprecision(BigFloat, bits) do
+        numeric_target = Complex{BigFloat}[_complex_big(value) for value in target]
+        length(_normalise_waypoints(numeric_target, effective_branch, requested_waypoints))
+    end
+    path_class = waypoint_requested ? :user :
+                 effective_branch < 0 ? :lower :
+                 effective_branch > 0 ? :upper : :principal
+    path_provenance = waypoint_requested ? :explicit_waypoints :
+                      effective_branch == 0 ? :radial : :branch_detour
+    return (
+        branch_provenance = waypoint_requested ? :explicit_waypoints : :explicit_branch,
+        path_provenance,
+        path_class,
+        path_segments = segments,
+    )
+end
+
 function _generic_predefined_evaluate(
     series,
     target,
@@ -315,6 +448,7 @@ function _generic_predefined_evaluate(
     derivatives::Bool,
     digits::Int,
     maximum_degree::Int,
+    source_precision::Integer = 0,
     kwargs...,
 )
     derivatives && throw(
@@ -324,9 +458,12 @@ function _generic_predefined_evaluate(
         ),
     )
     options = _predefined_effective_options(kwargs)
-    if !certified && method === :pfaffian && !_predefined_path_requested(options)
+    default_pfaffian_path =
+        !certified && method === :pfaffian && !_predefined_path_requested(options)
+    if default_pfaffian_path
         options = merge(options, (branch_side = 0,))
     end
+    precision_sink = Ref{Any}(nothing)
     value = if certified
         isnothing(epsilon) || throw(
             ArgumentError("certified evaluation does not support epsilon-dependent parameters"),
@@ -347,6 +484,8 @@ function _generic_predefined_evaluate(
             epsilon_order,
             digits,
             maximum_degree,
+            _minimum_working_precision = Int(source_precision),
+            _precision_sink = precision_sink,
             options...,
         )
     else
@@ -357,22 +496,57 @@ function _generic_predefined_evaluate(
             epsilon,
             digits,
             maximum_degree,
+            _minimum_working_precision = Int(source_precision),
+            _precision_sink = precision_sink,
             options...,
         )
     end
     method_used = certified ? :certified :
                   (method === :pfaffian || _predefined_path_requested(options) ?
                    :pfaffian : :generic)
+    error_estimate = certified ? _certified_error_radius(value) : BigFloat(NaN)
+    precision_metadata = if certified
+        (
+            working_precision = value.working_bits,
+            working_digits = _bits_to_digits(value.working_bits),
+        )
+    else
+        isnothing(precision_sink[]) && error(
+            "internal error: generic evaluation did not report its working precision",
+        )
+        precision_sink[]
+    end
+    path_metadata = if certified
+        (
+            branch_provenance = :principal,
+            path_provenance = :certified_enclosure,
+            path_class = :principal,
+            path_segments = 0,
+        )
+    else
+        metadata = _predefined_path_diagnostics(options, target)
+        default_pfaffian_path ? merge(metadata, (branch_provenance = :automatic,)) :
+        metadata
+    end
+    compressed_dimension = _predefined_path_requested(options) ?
+                           length(target) : count(!iszero, target)
     result = _hypergeometric_result(
         value,
         nothing,
         method_used,
         nothing,
         0,
-        certified ? 0 : NaN,
+        error_estimate,
         started_ns;
         convergence_test = certified ? :ball_enclosure : nothing,
         certified,
+        working_precision = precision_metadata.working_precision,
+        working_digits = precision_metadata.working_digits,
+        error_status = certified ? :certified : :unknown,
+        compressed_dimension,
+        path_metadata...,
+        work_degree = nothing,
+        work_steps = nothing,
     )
     return return_diagnostics ? result : value
 end
@@ -409,7 +583,12 @@ function _pfq_closed_form_checked(
     isempty(lower) || return nothing
     length(upper) <= 1 || return nothing
     guard_digits = _parameter_guard_digits((upper..., argument))
-    bits = _digits_to_bits(digits + 20 + guard_digits)
+    nominal_digits = digits + 20 + guard_digits
+    bits = max(
+        _digits_to_bits(nominal_digits),
+        _maximum_source_precision_bits((upper..., argument)),
+    )
+    working_digits = max(nominal_digits, _bits_to_digits(bits))
     return setprecision(BigFloat, bits) do
         z = _complex_big(argument)
         derivative_values = nothing
@@ -445,8 +624,138 @@ function _pfq_closed_form_checked(
             terms = 0,
             error_estimate = zero(BigFloat),
             convergence_test,
+            working_precision = bits,
+            working_digits,
         )
     end
+end
+
+function _arb_ball_radius(value::Arblib.Acb)
+    real_radius = BigFloat(Arblib.radius(Arblib.Arb, real(value)))
+    imaginary_radius = BigFloat(Arblib.radius(Arblib.Arb, imag(value)))
+    return hypot(real_radius, imaginary_radius)
+end
+
+function _arb_ball_midpoint(value::Arblib.Acb)
+    midpoint = Arblib.midpoint(Arblib.Arb, value)
+    return Complex{BigFloat}(BigFloat(real(midpoint)), BigFloat(imag(midpoint)))
+end
+
+function _arb_pfq_scalar(upper, lower, argument; digits::Int)
+    guard_digits = _parameter_guard_digits((upper..., lower..., argument))
+    input_bits = maximum(
+        _input_precision_bits(value) for value in (upper..., lower..., argument);
+        init = 256,
+    )
+    bits = max(_digits_to_bits(digits + 24 + guard_digits), input_bits)
+    return setprecision(BigFloat, bits) do
+        arb_upper = Arblib.AcbVector(
+            [Arblib.Acb(_complex_big(value); prec = bits) for value in upper];
+            prec = bits,
+        )
+        arb_lower = Arblib.AcbVector(
+            [Arblib.Acb(_complex_big(value); prec = bits) for value in lower];
+            prec = bits,
+        )
+        arb_argument = Arblib.Acb(_complex_big(argument); prec = bits)
+        enclosure = Arblib.Acb(prec = bits)
+        Arblib.hypgeom_pfq!(
+            enclosure,
+            arb_upper,
+            length(upper),
+            arb_lower,
+            length(lower),
+            arb_argument,
+            0,
+            bits,
+        )
+        isfinite(enclosure) || return (
+            converged = false,
+            value = Complex{BigFloat}(NaN, NaN),
+            error_estimate = BigFloat(Inf),
+            working_precision = bits,
+            working_digits = _bits_to_digits(bits),
+        )
+        value = _arb_ball_midpoint(enclosure)
+        radius = _arb_ball_radius(enclosure)
+        conversion_error = eps(BigFloat) * max(abs(value), one(BigFloat))
+        error_estimate = radius + conversion_error
+        tolerance = big(10.0)^(-(digits + 4)) * max(abs(value), one(BigFloat))
+        return (
+            converged = isfinite(error_estimate) && error_estimate <= tolerance,
+            value,
+            error_estimate,
+            working_precision = bits,
+            working_digits = _bits_to_digits(bits),
+        )
+    end
+end
+
+function _arb_pfq_checked(upper, lower, argument; digits::Int, derivatives::Bool)
+    scalar = _arb_pfq_scalar(upper, lower, argument; digits)
+    scalar.converged || return merge(scalar, (derivatives = nothing, terms = 0))
+    derivative_values = nothing
+    error_estimate = scalar.error_estimate
+    terms = 1
+    working_precision = scalar.working_precision
+    working_digits = scalar.working_digits
+    if derivatives
+        prefactor = one(argument)
+        for value in upper
+            prefactor *= value
+        end
+        for value in lower
+            iszero(value) && throw(
+                ArgumentError("the pFq derivative has a zero lower prefactor"),
+            )
+            prefactor /= value
+        end
+        if iszero(prefactor)
+            derivative_values = [zero(scalar.value)]
+        else
+            shifted = _arb_pfq_scalar(
+                [value + 1 for value in upper],
+                [value + 1 for value in lower],
+                argument;
+                digits,
+            )
+            shifted.converged || return merge(
+                scalar,
+                (converged = false, derivatives = nothing, terms = 1),
+            )
+            derivative_values = [prefactor * shifted.value]
+            error_estimate = max(
+                error_estimate,
+                abs(prefactor) * shifted.error_estimate,
+            )
+            working_precision = max(working_precision, shifted.working_precision)
+            working_digits = max(working_digits, shifted.working_digits)
+            terms = 2
+        end
+    end
+    return merge(
+        scalar,
+        (
+            derivatives = derivative_values,
+            error_estimate,
+            terms,
+            working_precision,
+            working_digits,
+        ),
+    )
+end
+
+function _pfq_arb_auto_candidate(upper, lower, argument, digits::Int)
+    termination = _termination_degree(upper)
+    isnothing(termination) || return false
+    p = length(upper)
+    q = length(lower)
+    p <= q + 1 || return false
+    radius = BigFloat(abs(argument))
+    if p == q + 1
+        return radius > big"0.10" || digits >= 25
+    end
+    return radius > big"0.20" || digits >= 25
 end
 
 function _pfq_ratio_bound(upper, lower, argument, degree::Int)
@@ -519,6 +828,7 @@ function _pfq_exact_terminating_scalar(
             convergence_test = :exact_termination,
             peak_term = converted_peak,
             working_digits = digits + 20 + guard_digits,
+            working_precision = bits,
         )
     end
 end
@@ -533,6 +843,10 @@ function _pfq_scalar_series(
 )
     upper_raw, lower_raw = _cancel_equal_parameters(raw_upper, raw_lower)
     termination = _termination_degree(upper_raw)
+    source_precision = _maximum_source_precision_bits((upper_raw..., lower_raw..., raw_argument))
+    base_digits = digits + 20 + extra_guard_digits
+    base_precision = max(_digits_to_bits(base_digits), source_precision)
+    base_digits = max(base_digits, _bits_to_digits(base_precision))
     _pfq_series_available(upper_raw, lower_raw, raw_argument) || return (
         value = Complex{BigFloat}(NaN, NaN),
         converged = false,
@@ -541,7 +855,8 @@ function _pfq_scalar_series(
         error_estimate = BigFloat(Inf),
         convergence_test = :outside_series_domain,
         peak_term = BigFloat(Inf),
-        working_digits = digits,
+        working_digits = base_digits,
+        working_precision = base_precision,
     )
     !isnothing(termination) && termination > maximum_degree && return (
         value = Complex{BigFloat}(NaN, NaN),
@@ -551,7 +866,8 @@ function _pfq_scalar_series(
         error_estimate = BigFloat(Inf),
         convergence_test = :degree_gate,
         peak_term = BigFloat(Inf),
-        working_digits = digits,
+        working_digits = base_digits,
+        working_precision = base_precision,
     )
 
     guard_digits = _parameter_guard_digits((upper_raw..., lower_raw..., raw_argument))
@@ -567,7 +883,8 @@ function _pfq_scalar_series(
         isnothing(exact) || return exact
     end
     working_digits = digits + 20 + guard_digits + extra_guard_digits
-    bits = _digits_to_bits(working_digits)
+    bits = max(_digits_to_bits(working_digits), source_precision)
+    working_digits = max(working_digits, _bits_to_digits(bits))
     return setprecision(BigFloat, bits) do
         T = Complex{BigFloat}
         upper = T[_complex_big(value) for value in upper_raw]
@@ -591,6 +908,7 @@ function _pfq_scalar_series(
                 convergence_test = :nonfinite,
                 peak_term,
                 working_digits,
+                working_precision = bits,
             )
             if !isnothing(termination) && degree == termination
                 return (
@@ -602,6 +920,7 @@ function _pfq_scalar_series(
                     convergence_test = :finite_termination,
                     peak_term,
                     working_digits,
+                    working_precision = bits,
                 )
             end
 
@@ -619,6 +938,7 @@ function _pfq_scalar_series(
                         convergence_test = :ratio_majorant,
                         peak_term,
                         working_digits,
+                        working_precision = bits,
                     )
                 end
             end
@@ -648,6 +968,7 @@ function _pfq_scalar_series(
             convergence_test = :degree_gate,
             peak_term,
             working_digits,
+            working_precision = bits,
         )
     end
 end
@@ -721,6 +1042,8 @@ function _pfq_series_checked(
     error_estimate = scalar.error_estimate
     terms = scalar.terms
     degree = scalar.degree
+    working_precision = scalar.working_precision
+    working_digits = scalar.working_digits
     if derivatives
         normalized_upper, normalized_lower = _cancel_equal_parameters(upper, lower)
         numerator_prefactor = prod(normalized_upper; init = 1)
@@ -745,6 +1068,8 @@ function _pfq_series_checked(
         error_estimate = max(error_estimate, abs(prefactor) * shifted.error_estimate)
         terms += shifted.terms
         degree = max(degree, shifted.degree)
+        working_precision = max(working_precision, shifted.working_precision)
+        working_digits = max(working_digits, shifted.working_digits)
     end
     return merge(
         scalar,
@@ -753,6 +1078,8 @@ function _pfq_series_checked(
             degree,
             terms,
             error_estimate,
+            working_precision,
+            working_digits,
         ),
     )
 end
@@ -773,7 +1100,7 @@ function _pfq_frontend(
     kwargs...,
 )
     started_ns = time_ns()
-    _check_predefined_fast_method(method)
+    _check_pfq_fast_method(method)
     digits > 0 || throw(ArgumentError("digits must be positive"))
     digits <= typemax(Int) || throw(ArgumentError("digits is too large"))
     maximum_degree >= 0 || throw(ArgumentError("maximum_degree must be nonnegative"))
@@ -782,6 +1109,8 @@ function _pfq_frontend(
     series_cost_gate <= typemax(Int) || throw(ArgumentError("series_cost_gate is too large"))
     upper_values = collect(upper)
     lower_values = collect(lower)
+    frontend_source_precision =
+        _source_precision_bits((upper_values, lower_values, argument, epsilon))
     normalized_upper, normalized_lower = _cancel_equal_parameters(upper_values, lower_values)
     lower_pole = _termination_degree(normalized_lower)
     upper_termination = _termination_degree(normalized_upper)
@@ -822,6 +1151,19 @@ function _pfq_frontend(
             "method = :series does not accept epsilon, certification, branch, waypoint, or transport options",
         ),
     )
+    method === :arb && generic_frontend && throw(
+        ArgumentError(
+            "method = :arb evaluates the principal pFq branch and does not accept " *
+            "epsilon, certification, branch, waypoint, or transport options",
+        ),
+    )
+    method === :arb &&
+        isnothing(upper_termination) &&
+        length(normalized_upper) > length(normalized_lower) + 1 && throw(
+        ArgumentError(
+            "method = :arb requires p <= q + 1 or a terminating upper parameter",
+        ),
+    )
     if (method in (:auto, :series) && !generic_frontend) || exact_form_override
         if path_requested
             effective_branch_side = haskey(kwargs, :branch_side) &&
@@ -854,6 +1196,14 @@ function _pfq_frontend(
                 _output_rounding_allowance(value, derivative_values, Int(digits)),
                 started_ns;
                 convergence_test = closed_form.convergence_test,
+                working_precision = closed_form.working_precision,
+                working_digits = closed_form.working_digits,
+                compressed_dimension = 1,
+                path_provenance = :principal_reduction,
+                path_class = :principal,
+                path_segments = 0,
+                work_degree = closed_form.degree,
+                work_steps = closed_form.terms,
             )
             return _return_predefined_value(
                 value,
@@ -883,7 +1233,65 @@ function _pfq_frontend(
             derivatives,
             digits = Int(digits),
             maximum_degree = Int(maximum_degree),
+            source_precision = frontend_source_precision,
             kwargs...,
+        )
+    end
+
+    arb_candidate = method === :arb ||
+                    (method === :auto &&
+                     !protected_near_pole &&
+                     _pfq_arb_auto_candidate(
+                         normalized_upper,
+                         normalized_lower,
+                         argument,
+                         Int(digits),
+                     ))
+    if arb_candidate
+        arb_calculation = _arb_pfq_checked(
+            normalized_upper,
+            normalized_lower,
+            argument;
+            digits = Int(digits),
+            derivatives,
+        )
+        if arb_calculation.converged
+            value = _chop_value(arb_calculation.value, Int(digits))
+            derivative_values = isnothing(arb_calculation.derivatives) ? nothing :
+                                [
+                                    _chop_value(item, Int(digits)) for
+                                    item in arb_calculation.derivatives
+                                ]
+            result = _hypergeometric_result(
+                value,
+                derivative_values,
+                :arb,
+                nothing,
+                arb_calculation.terms,
+                max(
+                    arb_calculation.error_estimate,
+                    _output_rounding_allowance(value, derivative_values, Int(digits)),
+                ),
+                started_ns;
+                convergence_test = :ball_enclosure,
+                working_precision = arb_calculation.working_precision,
+                working_digits = arb_calculation.working_digits,
+                error_status = :bounded,
+                compressed_dimension = 1,
+                path_provenance = :principal_arb,
+                path_class = :principal,
+                path_segments = 0,
+                work_steps = arb_calculation.terms,
+            )
+            return _return_predefined_value(
+                value,
+                derivative_values,
+                return_diagnostics,
+                result,
+            )
+        end
+        method === :arb && throw(
+            ErrorException("the Arblib pFq enclosure did not reach the requested precision"),
         )
     end
 
@@ -922,6 +1330,7 @@ function _pfq_frontend(
             derivatives,
             digits = Int(digits),
             maximum_degree = Int(maximum_degree),
+            source_precision = frontend_source_precision,
         )
     end
 
@@ -954,6 +1363,7 @@ function _pfq_frontend(
             derivatives,
             digits = Int(digits),
             maximum_degree = Int(maximum_degree),
+            source_precision = frontend_source_precision,
         )
     end
     value = _chop_value(calculation.value, Int(digits))
@@ -971,6 +1381,14 @@ function _pfq_frontend(
         ),
         started_ns;
         convergence_test = calculation.convergence_test,
+        working_precision = calculation.working_precision,
+        working_digits = calculation.working_digits,
+        compressed_dimension = 1,
+        path_provenance = :principal_series,
+        path_class = :principal,
+        path_segments = 0,
+        work_degree = calculation.degree,
+        work_steps = calculation.terms,
     )
     return _return_predefined_value(value, derivative_values, return_diagnostics, result)
 end
@@ -1184,6 +1602,7 @@ function _lauricella_terminating_convolution_stable(
     digits::Int,
     guard_digits::Int,
     derivatives::Bool,
+    source_precision::Int,
 )
     precision_guards = (0, 32, 96, 224, 480, 992, 2016, 4096)
     previous_value = nothing
@@ -1193,7 +1612,10 @@ function _lauricella_terminating_convolution_stable(
     tolerance = big(10.0)^(-(digits + 4))
 
     for extra_guard_digits in precision_guards
-        bits = _digits_to_bits(digits + 20 + guard_digits + extra_guard_digits)
+        bits = max(
+            _digits_to_bits(digits + 20 + guard_digits + extra_guard_digits),
+            source_precision,
+        )
         value, derivative_values, operations = setprecision(BigFloat, bits) do
             _lauricella_convolution_once(
                 kind,
@@ -1235,6 +1657,8 @@ function _lauricella_terminating_convolution_stable(
                     error_estimate = maximum(discrepancies; init = zero(BigFloat)),
                     convergence_test = instability_observed ?
                                        :precision_rerun : :exact_termination,
+                    working_precision = bits,
+                    working_digits = _bits_to_digits(bits),
                 )
             end
             instability_observed = true
@@ -1257,7 +1681,10 @@ function _lauricella_convolution_checked(
     derivatives::Bool,
 )
     termination = _lauricella_convolution_termination(kind, first, second, lower)
-    radius = _lauricella_convolution_radius(kind, arguments)
+    source_precision = _source_precision_bits((first, second, lower, arguments))
+    radius = setprecision(BigFloat, max(256, source_precision)) do
+        _lauricella_convolution_radius(kind, arguments)
+    end
     if isnothing(termination) && radius >= 1
         return (converged = false, reason = :outside_series_domain)
     end
@@ -1310,10 +1737,11 @@ function _lauricella_convolution_checked(
             digits,
             guard_digits,
             derivatives,
+            source_precision,
         )
     end
 
-    bits = _digits_to_bits(digits + 20 + guard_digits)
+    bits = max(_digits_to_bits(digits + 20 + guard_digits), source_precision)
     return setprecision(BigFloat, bits) do
         degree = target_degree
         tolerance = big(10.0)^(-(digits + 6))
@@ -1354,6 +1782,8 @@ function _lauricella_convolution_checked(
                     terms = operations + lower_operations,
                     error_estimate,
                     convergence_test = :doubled_degree,
+                    working_precision = bits,
+                    working_digits = _bits_to_digits(bits),
                 )
             end
             degree >= maximum_degree && return (converged = false, reason = :degree_gate)
@@ -1398,6 +1828,8 @@ function _lauricella_convolution_frontend(
     maximum_degree <= typemax(Int) || throw(ArgumentError("maximum_degree is too large"))
     series_cost_gate > 0 || throw(ArgumentError("series_cost_gate must be positive"))
     series_cost_gate <= typemax(Int) || throw(ArgumentError("series_cost_gate is too large"))
+    frontend_source_precision =
+        _source_precision_bits((first, second, lower, arguments, epsilon))
     path_requested = _predefined_path_requested(kwargs)
     numeric_parameters = all(
         value -> value isa Number,
@@ -1428,6 +1860,7 @@ function _lauricella_convolution_frontend(
             derivatives,
             digits = Int(digits),
             maximum_degree = Int(maximum_degree),
+            source_precision = frontend_source_precision,
             kwargs...,
         )
     end
@@ -1461,6 +1894,16 @@ function _lauricella_convolution_frontend(
             ),
             started_ns;
             convergence_test = reduced.convergence_test,
+            working_precision = reduced.working_precision,
+            working_digits = reduced.working_digits,
+            error_status = reduced.error_status,
+            compressed_dimension = length(arguments),
+            branch_provenance = reduced.branch_provenance,
+            path_provenance = :principal_reduction,
+            path_class = reduced.path_class,
+            path_segments = reduced.path_segments,
+            work_degree = reduced.work_degree,
+            work_steps = reduced.work_steps,
         )
         return _return_predefined_value(
             reduced.value,
@@ -1502,6 +1945,7 @@ function _lauricella_convolution_frontend(
             derivatives,
             digits = Int(digits),
             maximum_degree = Int(maximum_degree),
+            source_precision = frontend_source_precision,
         )
     end
     value = _chop_value(calculation.value, Int(digits))
@@ -1519,6 +1963,14 @@ function _lauricella_convolution_frontend(
         ),
         started_ns;
         convergence_test = calculation.convergence_test,
+        working_precision = calculation.working_precision,
+        working_digits = calculation.working_digits,
+        compressed_dimension = length(arguments),
+        path_provenance = :principal_series,
+        path_class = :principal,
+        path_segments = 0,
+        work_degree = calculation.degree,
+        work_steps = calculation.terms,
     )
     return _return_predefined_value(value, derivative_values, return_diagnostics, result)
 end
@@ -1700,6 +2152,7 @@ function _horn_terminating_grid_stable(
     digits::Int,
     guard_digits::Int,
     derivatives::Bool,
+    source_precision::Int,
 )
     precision_guards = (0, 32, 96, 224, 480, 992, 2016, 4096)
     previous_value = nothing
@@ -1709,7 +2162,10 @@ function _horn_terminating_grid_stable(
     tolerance = big(10.0)^(-(digits + 4))
 
     for extra_guard_digits in precision_guards
-        bits = _digits_to_bits(digits + 24 + guard_digits + extra_guard_digits)
+        bits = max(
+            _digits_to_bits(digits + 24 + guard_digits + extra_guard_digits),
+            source_precision,
+        )
         value, derivative_values, terms = setprecision(BigFloat, bits) do
             _horn_grid_once(series, arguments, degree; derivatives)
         end
@@ -1737,6 +2193,8 @@ function _horn_terminating_grid_stable(
                     error_estimate = maximum(discrepancies; init = zero(BigFloat)),
                     convergence_test = instability_observed ?
                                        :precision_rerun : :exact_termination,
+                    working_precision = bits,
+                    working_digits = _bits_to_digits(bits),
                 )
             end
             instability_observed = true
@@ -1755,7 +2213,10 @@ function _horn_grid_checked(
     series_cost_gate::Int,
     derivatives::Bool,
 )
-    radius = max(abs(_complex_big(arguments[1])), abs(_complex_big(arguments[2])))
+    source_precision = _source_precision_bits((series, arguments))
+    radius = setprecision(BigFloat, max(256, source_precision)) do
+        max(abs(_complex_big(arguments[1])), abs(_complex_big(arguments[2])))
+    end
     termination = _horn_safe_termination_degree(series)
     convergence_burn_in = isnothing(termination) ?
                           _predefined_series_degree_estimate(
@@ -1804,9 +2265,11 @@ function _horn_grid_checked(
             digits,
             guard_digits,
             derivatives,
+            source_precision,
         )
     end
-    return setprecision(BigFloat, _digits_to_bits(digits + 24 + guard_digits)) do
+    bits = max(_digits_to_bits(digits + 24 + guard_digits), source_precision)
+    return setprecision(BigFloat, bits) do
         degree = initial_degree
         tolerance = big(10.0)^(-(digits + 6))
         while true
@@ -1832,6 +2295,8 @@ function _horn_grid_checked(
                     terms = terms + lower_terms,
                     error_estimate,
                     convergence_test = :doubled_degree,
+                    working_precision = bits,
+                    working_digits = _bits_to_digits(bits),
                 )
             end
             degree >= maximum_degree && return (converged = false, reason = :degree_gate)
@@ -1872,6 +2337,7 @@ function _horn_frontend(
     series_cost_gate > 0 || throw(ArgumentError("series_cost_gate must be positive"))
     series_cost_gate <= typemax(Int) || throw(ArgumentError("series_cost_gate is too large"))
     length(arguments) == 2 || throw(DimensionMismatch("a Horn grid requires two arguments"))
+    frontend_source_precision = _source_precision_bits((series, arguments, epsilon))
     _horn_has_unsafe_exact_lower_pole(series) && throw(
         ArgumentError(
             "the Horn series has an uncancelled nonpositive integral lower parameter",
@@ -1899,12 +2365,20 @@ function _horn_frontend(
             derivatives,
             digits = Int(digits),
             maximum_degree = Int(maximum_degree),
+            source_precision = frontend_source_precision,
             kwargs...,
         )
     end
-    radius = max(abs(_complex_big(arguments[1])), abs(_complex_big(arguments[2])))
+    radius = setprecision(BigFloat, max(256, frontend_source_precision)) do
+        max(abs(_complex_big(arguments[1])), abs(_complex_big(arguments[2])))
+    end
     termination = _horn_safe_termination_degree(series)
-    if method === :auto && radius > big"0.05" && isnothing(termination)
+    # The shared Horn grid is admitted only in a strict interior polydisk.  The
+    # degree and cell gates below remain the quantitative cost model inside
+    # this mathematical admission region.  Outside it we retain the generic
+    # contour frontend because a family-specific convergence certificate is
+    # not yet available for every named Horn function.
+    if method === :auto && radius > big"0.10" && isnothing(termination)
         return _generic_predefined_evaluate(
             series,
             arguments,
@@ -1917,6 +2391,7 @@ function _horn_frontend(
             derivatives,
             digits = Int(digits),
             maximum_degree = Int(maximum_degree),
+            source_precision = frontend_source_precision,
         )
     end
     calculation = try
@@ -1944,6 +2419,7 @@ function _horn_frontend(
                 derivatives,
                 digits = Int(digits),
                 maximum_degree = Int(maximum_degree),
+                source_precision = frontend_source_precision,
             )
         end
         rethrow()
@@ -1972,6 +2448,7 @@ function _horn_frontend(
             derivatives,
             digits = Int(digits),
             maximum_degree = Int(maximum_degree),
+            source_precision = frontend_source_precision,
         )
     end
     value = _chop_value(calculation.value, Int(digits))
@@ -1989,6 +2466,14 @@ function _horn_frontend(
         ),
         started_ns;
         convergence_test = calculation.convergence_test,
+        working_precision = calculation.working_precision,
+        working_digits = calculation.working_digits,
+        compressed_dimension = length(arguments),
+        path_provenance = :principal_series,
+        path_class = :principal,
+        path_segments = 0,
+        work_degree = calculation.degree,
+        work_steps = calculation.terms,
     )
     return _return_predefined_value(value, derivative_values, return_diagnostics, result)
 end
@@ -2011,14 +2496,17 @@ function _appell_f1_frontend(
     kwargs...,
 )
     started_ns = time_ns()
-    _check_predefined_fast_method(method)
+    _check_appell_f1_fast_method(method)
     series = _appell_f1_series(a, b1, b2, c)
+    frontend_source_precision = _source_precision_bits((a, b1, b2, c, x, y, epsilon))
     generic_frontend = !isnothing(epsilon_order) || !isnothing(epsilon) || certified ||
                        _has_epsilon(series) || !(a isa Number && b1 isa Number &&
                        b2 isa Number && c isa Number)
     if generic_frontend || method === :generic
-        method === :series && throw(
-            ArgumentError("method = :series requires numerical parameters without epsilon or certification"),
+        method in (:closed_form, :series, :euler) && throw(
+            ArgumentError(
+                "a specialized Appell F1 method requires numerical parameters without epsilon or certification",
+            ),
         )
         return _generic_predefined_evaluate(
             series,
@@ -2032,10 +2520,45 @@ function _appell_f1_frontend(
             derivatives,
             digits = Int(digits),
             maximum_degree = Int(maximum_degree),
+            source_precision = frontend_source_precision,
             kwargs...,
         )
     end
-    fd_method = method === :pfaffian ? :pfaffian : method
+    if iszero(b1) && iszero(b2)
+        source_precision = _maximum_source_precision_bits((a, b1, b2, c, x, y))
+        working_precision = max(_digits_to_bits(Int(digits) + 14), source_precision)
+        value, derivative_values = setprecision(BigFloat, working_precision) do
+            one_value = BigFloat(1)
+            derivative_values = derivatives ? [BigFloat(0), BigFloat(0)] : nothing
+            one_value, derivative_values
+        end
+        result = _hypergeometric_result(
+            value,
+            derivative_values,
+            :constant,
+            0,
+            0,
+            _output_rounding_allowance(value, derivative_values, Int(digits)),
+            started_ns;
+            convergence_test = :exact_termination,
+            working_precision,
+            working_digits = _bits_to_digits(working_precision),
+            compressed_dimension = 0,
+            path_provenance = :principal_reduction,
+            path_class = :principal,
+            path_segments = 0,
+            work_degree = 0,
+            work_steps = 0,
+        )
+        return _return_predefined_value(
+            value,
+            derivative_values,
+            return_diagnostics,
+            result,
+        )
+    end
+    fd_method = method
+    derivative_sink = derivatives ? Ref{Any}(nothing) : nothing
     details = lauricella_fd(
         a,
         [b1, b2],
@@ -2045,13 +2568,16 @@ function _appell_f1_frontend(
         return_diagnostics = true,
         digits,
         maximum_degree,
+        _derivative_sink = derivative_sink,
         kwargs...,
     )
     derivative_values = nothing
     terms = details.method_used === :series && !isnothing(details.degree) ?
             _saturating_add(details.degree, 1) : 0
     error_estimate = details.error_estimate
-    if derivatives
+    if derivatives && !isnothing(derivative_sink[])
+        derivative_values = derivative_sink[]
+    elseif derivatives
         derivative_values = Any[]
         for (index, parameter) in enumerate((b1, b2))
             numerator_prefactor = a * parameter
@@ -2093,6 +2619,16 @@ function _appell_f1_frontend(
         ),
         started_ns;
         convergence_test = details.convergence_test,
+        working_precision = details.working_precision,
+        working_digits = details.working_digits,
+        error_status = details.error_status,
+        compressed_dimension = details.compressed_dimension,
+        branch_provenance = details.branch_provenance,
+        path_provenance = details.path_provenance,
+        path_class = details.path_class,
+        path_segments = details.path_segments,
+        work_degree = details.work_degree,
+        work_steps = details.work_steps,
     )
     return _return_predefined_value(
         details.value,

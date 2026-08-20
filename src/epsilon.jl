@@ -60,15 +60,24 @@ function hyp_expand(
     maximum_degree::Integer = 260,
     maximum_steps::Integer = 20_000,
     verbose::Bool = false,
+    _minimum_working_precision::Integer = 0,
+    _precision_sink = nothing,
 )
     epsilon_order >= 0 || throw(ArgumentError("epsilon_order must be non-negative"))
     digits > 0 || throw(ArgumentError("digits must be positive"))
     interpolation_guard >= 1 ||
         throw(ArgumentError("interpolation_guard must be positive"))
+    _minimum_working_precision >= 0 ||
+        throw(ArgumentError("_minimum_working_precision must be nonnegative"))
+    source_precision = max(
+        Int(_minimum_working_precision),
+        _source_precision_bits((series, target, waypoints)),
+    )
     inferred_pole = pole_order === :auto ? _estimate_pole_order(series) : Int(pole_order)
     inferred_pole >= 0 || throw(ArgumentError("pole_order must be non-negative"))
 
     if !_has_epsilon(series)
+        evaluation_precision = Ref{Any}(nothing)
         value = evaluate(
             series,
             target;
@@ -82,10 +91,19 @@ function hyp_expand(
             maximum_degree,
             maximum_steps,
             verbose,
+            _minimum_working_precision = source_precision,
+            _precision_sink = evaluation_precision,
         )
-        coefficients = zeros(Complex{BigFloat}, epsilon_order + 1)
-        coefficients[1] = _complex_big(value)
-        return LaurentExpansion(0, coefficients, zero(BigFloat))
+        isnothing(evaluation_precision[]) && error(
+            "internal error: epsilon-free evaluation did not report its working precision",
+        )
+        actual_bits = evaluation_precision[].working_precision
+        _record_working_precision!(_precision_sink, actual_bits)
+        return setprecision(BigFloat, actual_bits) do
+            coefficients = zeros(Complex{BigFloat}, epsilon_order + 1)
+            coefficients[1] = _complex_big(value)
+            LaurentExpansion(0, coefficients, zero(BigFloat))
+        end
     end
 
     target_degree = inferred_pole + Int(epsilon_order)
@@ -93,7 +111,8 @@ function hyp_expand(
     sample_count = fit_degree + 1
     scale_exponent = max(2, ceil(Int, (Int(digits) + 10) / (fit_degree + 1)))
     working_digits = Int(digits) + scale_exponent * (target_degree + 3) + 18
-    bits = _digits_to_bits(working_digits)
+    bits = max(_digits_to_bits(working_digits), source_precision)
+    _record_working_precision!(_precision_sink, bits)
 
     return setprecision(BigFloat, bits) do
         epsilon_scale = big(10.0)^(-scale_exponent)
@@ -127,6 +146,8 @@ function hyp_expand(
                 maximum_degree,
                 maximum_steps,
                 verbose = false,
+                _minimum_working_precision = bits,
+                _precision_sink,
             )
             values_at_nodes[index] =
                 _complex_big(value) * (epsilon_scale * scaled_nodes[index])^inferred_pole
@@ -165,6 +186,8 @@ function hyp_expand(
             maximum_degree,
             maximum_steps,
             verbose = false,
+            _minimum_working_precision = bits,
+            _precision_sink,
         )
         reconstructed = zero(Complex{BigFloat})
         for degree in 0:fit_degree

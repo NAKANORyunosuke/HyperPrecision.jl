@@ -200,6 +200,7 @@ function _integrate_segment_frobenius(
     maximum_steps::Int,
     verbose::Bool,
     error_accumulator = nothing,
+    step_counter = nothing,
 ) where {N,T}
     direction = segment_end .- segment_start
     maximum(abs, direction; init = zero(BigFloat)) == 0 && return initial_value
@@ -256,5 +257,6 @@ function _integrate_segment_frobenius(
             relative_tail,
         )
     end
+    isnothing(step_counter) || (step_counter[] += patches)
     return value
 end

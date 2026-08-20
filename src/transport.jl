@@ -177,6 +177,7 @@ function _integrate_segment(
     maximum_steps::Int,
     verbose::Bool,
     error_accumulator = nothing,
+    step_counter = nothing,
 ) where {N,T}
     direction = segment_end .- segment_start
     maximum(abs, direction; init = zero(BigFloat)) == 0 && return initial_value
@@ -237,6 +238,7 @@ function _integrate_segment(
             step *= clamp(factor, BigFloat("0.10"), BigFloat("0.80"))
         end
     end
+    isnothing(step_counter) || (step_counter[] += accepted)
     verbose && println("HyperPrecision: accepted $accepted collocation steps")
     return value
 end
@@ -427,6 +429,8 @@ function evaluate(
     allow_expensive_pfaffian::Bool = false,
     maximum_steps::Integer = 20_000,
     verbose::Bool = false,
+    _minimum_working_precision::Integer = 0,
+    _precision_sink = nothing,
 ) where {N}
     digits > 0 || throw(ArgumentError("digits must be positive"))
     digits <= typemax(Int) || throw(ArgumentError("digits is too large"))
@@ -438,14 +442,26 @@ function evaluate(
     maximum_pfaffian_work > 0 || throw(ArgumentError("maximum_pfaffian_work must be positive"))
     maximum_pfaffian_work <= typemax(Int) ||
         throw(ArgumentError("maximum_pfaffian_work is too large"))
+    _minimum_working_precision >= 0 ||
+        throw(ArgumentError("_minimum_working_precision must be nonnegative"))
     isnothing(branch_side) || branch_side in (-1, 0, 1) || throw(
         ArgumentError("branch_side must be -1, 0, or 1"),
     )
     length(target) == N || throw(DimensionMismatch("the target has the wrong length"))
     path_requested = !isnothing(branch_side) || !isnothing(waypoints)
+    source_precision = max(
+        Int(_minimum_working_precision),
+        _source_precision_bits((series, target, epsilon, waypoints)),
+    )
     active = path_requested ? collect(1:N) :
              [index for index in 1:N if !iszero(target[index])]
-    isempty(active) && return BigFloat(1)
+    if isempty(active)
+        bits = max(_digits_to_bits(Int(digits) + 14), source_precision)
+        _record_working_precision!(_precision_sink, bits)
+        return setprecision(BigFloat, bits) do
+            BigFloat(1)
+        end
+    end
     restricted_series = _restrict_zero_variables(series, active)
     restricted_target = [target[index] for index in active]
     restricted_waypoints = if isnothing(waypoints)
@@ -457,7 +473,8 @@ function evaluate(
     end
     input_guard_digits = _horn_series_input_guard_digits(restricted_series, restricted_target)
     working_digits = Int(digits) + 14 + input_guard_digits
-    bits = _digits_to_bits(working_digits)
+    bits = max(_digits_to_bits(working_digits), source_precision)
+    _record_working_precision!(_precision_sink, bits)
 
     return setprecision(BigFloat, bits) do
         numeric = _instantiate(
@@ -490,7 +507,7 @@ function evaluate(
             )
         end
 
-        system = _derive_pfaffian(
+        system, _ = _derive_pfaffian_cached(
             numeric,
             bits,
             working_digits,

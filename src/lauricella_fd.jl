@@ -10,18 +10,64 @@ const _LAURICELLA_FD_METHODS =
 Store an opt-in Lauricella `FD` evaluation result.  The fields record the
 value, the method selected after dispatch, the terminating total degree when
 applicable, the numerical error estimate, the elapsed kernel time in seconds,
-the dimension after zero arguments have been removed, and the series
-convergence test when applicable.
+the dimension after reduction, the series convergence test, optional first
+derivatives, working precision, and branch and path provenance.
 """
-struct LauricellaFDResult{T}
+struct LauricellaFDResult{T,D}
     value::T
+    derivatives::D
     method_used::Symbol
     degree::Union{Nothing,Int}
     error_estimate::BigFloat
     elapsed_seconds::Float64
     compressed_dimension::Int
     convergence_test::Union{Nothing,Symbol}
+    certified::Bool
+    working_precision::Int
+    working_digits::Int
+    error_status::Symbol
+    branch_provenance::Symbol
+    path_provenance::Symbol
+    path_class::Symbol
+    path_segments::Union{Nothing,Int}
+    work_degree::Union{Nothing,Int}
+    work_steps::Union{Nothing,Int}
 end
+
+function LauricellaFDResult(
+    value,
+    method_used::Symbol,
+    degree,
+    error_estimate,
+    elapsed_seconds::Real,
+    compressed_dimension::Integer,
+    convergence_test,
+)
+    working_precision = _diagnostic_precision_bits(value)
+    return LauricellaFDResult(
+        value,
+        nothing,
+        method_used,
+        isnothing(degree) ? nothing : Int(degree),
+        BigFloat(error_estimate),
+        Float64(elapsed_seconds),
+        Int(compressed_dimension),
+        convergence_test,
+        false,
+        working_precision,
+        _bits_to_digits(working_precision),
+        _diagnostic_error_status(error_estimate, convergence_test),
+        :automatic,
+        :unknown,
+        :principal,
+        nothing,
+        isnothing(degree) ? nothing : Int(degree),
+        nothing,
+    )
+end
+
+is_certified(result::LauricellaFDResult) =
+    result.certified && is_certified(result.value)
 
 function _lauricella_fd_result(
     value,
@@ -31,16 +77,46 @@ function _lauricella_fd_result(
     compressed_dimension::Int,
     started_ns::UInt64;
     convergence_test::Union{Nothing,Symbol} = nothing,
+    derivatives = nothing,
+    certified::Bool = false,
+    working_precision::Union{Nothing,Integer} = nothing,
+    working_digits::Union{Nothing,Integer} = nothing,
+    error_status::Union{Nothing,Symbol} = nothing,
+    branch_provenance::Symbol = :automatic,
+    path_provenance::Symbol = :unknown,
+    path_class::Symbol = :principal,
+    path_segments::Union{Nothing,Integer} = nothing,
+    work_degree = degree,
+    work_steps::Union{Nothing,Integer} = nothing,
 )
     elapsed_seconds = (time_ns() - started_ns) / 1.0e9
+    precision_bits = isnothing(working_precision) ?
+                     _diagnostic_precision_bits(value, derivatives) :
+                     Int(working_precision)
+    precision_digits = isnothing(working_digits) ?
+                       _bits_to_digits(precision_bits) : Int(working_digits)
+    status = isnothing(error_status) ?
+             _diagnostic_error_status(error_estimate, convergence_test; certified) :
+             error_status
     return LauricellaFDResult(
         value,
+        derivatives,
         method_used,
         isnothing(degree) ? nothing : Int(degree),
         BigFloat(error_estimate),
         Float64(elapsed_seconds),
         compressed_dimension,
         convergence_test,
+        certified,
+        precision_bits,
+        precision_digits,
+        status,
+        branch_provenance,
+        path_provenance,
+        path_class,
+        isnothing(path_segments) ? nothing : Int(path_segments),
+        isnothing(work_degree) ? nothing : Int(work_degree),
+        isnothing(work_steps) ? nothing : Int(work_steps),
     )
 end
 
@@ -215,16 +291,21 @@ function _lauricella_fd_series_checked(
     digits::Int,
     maximum_degree::Int,
     input_guard_digits::Int,
+    _precision_sink = nothing,
 )
     comparison_tolerance = big(10.0)^(-(digits + 3))
     previous_values = nothing
     current_values = nothing
     current_degree = -1
     current_error = BigFloat(Inf)
+    source_precision = _maximum_source_precision_bits((a, c, b..., x...))
 
     for attempt in 0:2
         working_digits = digits + 14 + input_guard_digits + 10attempt
-        bits = _digits_to_bits(working_digits)
+        bits = max(_digits_to_bits(working_digits), source_precision)
+        effective_working_digits = max(working_digits, _bits_to_digits(bits))
+        isnothing(_precision_sink) ||
+            (_precision_sink[] = (bits, effective_working_digits))
         result, degree_comparison = setprecision(BigFloat, bits) do
             numeric_a = _complex_big(a)
             numeric_b = Complex{BigFloat}[_complex_big(value) for value in b]
@@ -332,8 +413,7 @@ function _lauricella_fd_termination_degree(a)
 end
 
 function _lauricella_fd_closed_form_parameters(a, c)
-    a == c || return false
-    return isnothing(_fd_nonpositive_integer_degree(c))
+    return a == c
 end
 
 function _lauricella_fd_closed_form_applicable(a, c, x)
@@ -351,6 +431,73 @@ function _lauricella_fd_closed_form(b::Vector{T}, x::Vector{T}) where {T}
         exponent -= b[i] * log1p(-x[i])
     end
     return exp(exponent)
+end
+
+function _fd_continued_log_increment(start, finish)
+    iszero(start) && throw(
+        SingularPfaffianError("a Lauricella FD product path starts on a branch point"),
+    )
+    iszero(finish) && throw(
+        SingularPfaffianError("a Lauricella FD product path ends on a branch point"),
+    )
+    cross = imag(conj(start) * finish)
+    dot = real(conj(start) * finish)
+    scale = max(abs(start) * abs(finish), one(BigFloat))
+    abs(cross) <= eps(BigFloat) * scale && dot < 0 && throw(
+        SingularPfaffianError("a Lauricella FD product path crosses a branch point"),
+    )
+    return log(abs(finish) / abs(start)) + im * atan(cross, dot)
+end
+
+function _lauricella_fd_continued_product(
+    b::Vector{T},
+    target::Vector{T};
+    branch_side::Int,
+    branch_requested::Bool,
+    waypoints,
+    derivatives::Bool,
+) where {T}
+    endpoints = _normalise_waypoints(target, branch_side, waypoints)
+    current = zeros(T, length(target))
+    logarithms = zeros(T, length(target))
+    for endpoint in endpoints
+        for index in eachindex(target)
+            logarithms[index] += _fd_continued_log_increment(
+                one(T) - current[index],
+                one(T) - endpoint[index],
+            )
+        end
+        current = endpoint
+    end
+    value = exp(-sum(b .* logarithms; init = zero(T)))
+    derivative_values = derivatives ?
+                        [
+                            value * b[index] / (one(T) - target[index]) for
+                            index in eachindex(target)
+                        ] : nothing
+    error_estimate = eps(BigFloat) * max(
+        abs(value),
+        isnothing(derivative_values) ? zero(BigFloat) :
+        maximum(abs, derivative_values; init = zero(BigFloat)),
+        one(BigFloat),
+    )
+    path_class = isnothing(waypoints) ?
+                 (branch_side < 0 ? :lower : branch_side > 0 ? :upper : :principal) :
+                 :user
+    branch_provenance = !isnothing(waypoints) ? :explicit_waypoints :
+                        branch_requested ? :explicit_branch : :automatic
+    path_provenance = !isnothing(waypoints) ? :explicit_waypoints :
+                      !branch_requested ? :automatic_pfaffian :
+                      branch_side == 0 ? :radial : :branch_detour
+    return (
+        value,
+        derivatives = derivative_values,
+        error_estimate,
+        branch_provenance,
+        path_provenance,
+        path_class,
+        path_segments = length(endpoints),
+    )
 end
 
 function _fd_widen_exact_scalar(value)
@@ -537,6 +684,112 @@ function _lauricella_fd_euler(
     return (previous, false, maximum_levels, total_nodes, error_estimate)
 end
 
+function _fd_euler_integrand_state!(
+    state::Vector{T},
+    a::T,
+    b::Vector{T},
+    c::T,
+    x::Vector{T},
+    u::BigFloat,
+) where {T}
+    numerator, denominator = _fd_euler_integrand_pair(a, b, c, x, u)
+    log_t, _ = _fd_logistic_coordinates(u)
+    t = exp(log_t)
+    state[1] = numerator
+    for index in eachindex(x)
+        state[index + 1] = numerator * b[index] * t / (one(T) - x[index] * t)
+    end
+    state[end] = denominator
+    return state
+end
+
+function _lauricella_fd_euler_vector_level(
+    a::T,
+    b::Vector{T},
+    c::T,
+    x::Vector{T},
+    step::BigFloat;
+    tolerance::BigFloat,
+    maximum_nodes::Int,
+) where {T}
+    state = zeros(T, length(x) + 2)
+    positive = similar(state)
+    negative = similar(state)
+    _fd_euler_integrand_state!(state, a, b, c, x, zero(BigFloat))
+    consecutive_small = 0
+    nodes = 1
+    maximum_index = max(1, (maximum_nodes - 1) ÷ 2)
+    for index in 1:maximum_index
+        _fd_euler_integrand_state!(positive, a, b, c, x, index * step)
+        _fd_euler_integrand_state!(negative, a, b, c, x, -index * step)
+        nodes += 2
+        pair_norm = zero(BigFloat)
+        for component in eachindex(state)
+            pair_value = positive[component] + negative[component]
+            state[component] += pair_value
+            pair_norm = max(pair_norm, abs(pair_value))
+        end
+        state_norm = max(maximum(abs, state; init = zero(BigFloat)), one(BigFloat))
+        if index >= 6 && pair_norm <= tolerance * state_norm
+            consecutive_small += 1
+        else
+            consecutive_small = 0
+        end
+        if consecutive_small >= 6
+            denominator = state[end]
+            return state[1:(end - 1)] ./ denominator, nodes, true
+        end
+    end
+    denominator = state[end]
+    return state[1:(end - 1)] ./ denominator, nodes, false
+end
+
+function _lauricella_fd_euler_vector(
+    a::T,
+    b::Vector{T},
+    c::T,
+    x::Vector{T};
+    digits::Int,
+    maximum_levels::Int,
+    maximum_nodes::Int,
+) where {T}
+    _lauricella_fd_euler_applicable(a, c, x) || throw(
+        ArgumentError(
+            "Euler evaluation requires real parts Re(a) > 0 and Re(c-a) > 0, and its path must avoid every Euler-integrand branch point",
+        ),
+    )
+    maximum_levels >= 2 || throw(ArgumentError("euler_maximum_levels must be at least 2"))
+    maximum_nodes >= 33 || throw(ArgumentError("euler_maximum_nodes must be at least 33"))
+    truncation_tolerance = big(10.0)^(-(digits + 9))
+    comparison_tolerance = big(10.0)^(-(digits + 5))
+    previous = zeros(T, length(x) + 1)
+    error_estimate = BigFloat(Inf)
+    total_nodes = 0
+    step = BigFloat("0.5")
+    for level in 1:maximum_levels
+        values, nodes, truncated = _lauricella_fd_euler_vector_level(
+            a,
+            b,
+            c,
+            x,
+            step;
+            tolerance = truncation_tolerance,
+            maximum_nodes,
+        )
+        total_nodes += nodes
+        level_error = level > 1 ? maximum(abs, values .- previous) : BigFloat(Inf)
+        if level > 1 && truncated &&
+           level_error <= comparison_tolerance *
+                          max(maximum(abs, values; init = zero(BigFloat)), one(BigFloat))
+            return (values, true, level, total_nodes, BigFloat(level_error))
+        end
+        error_estimate = BigFloat(level_error)
+        previous = values
+        step /= 2
+    end
+    return (previous, false, maximum_levels, total_nodes, error_estimate)
+end
+
 function _lauricella_fd_connection(a::T, b::Vector{T}, c::T, point::Vector{T}) where {T}
     variables = length(point)
     rank = variables + 1
@@ -698,7 +951,10 @@ function lauricella_fd_pfaffian(a, b, c; digits::Integer = 50)
     parameters = collect(b)
     isempty(parameters) && throw(ArgumentError("Lauricella FD requires at least one variable"))
     digits > 0 || throw(ArgumentError("digits must be positive"))
-    bits = _digits_to_bits(Int(digits))
+    source_precision = _maximum_source_precision_bits((a, c, parameters...))
+    bits = max(_digits_to_bits(Int(digits)), source_precision)
+    working_digits = max(Int(digits), ceil(Int, bits / log2(10)) - 20)
+    _digits_to_bits(working_digits) < bits && (working_digits += 1)
     return setprecision(BigFloat, bits) do
         numeric_a = _complex_big(a)
         numeric_b = Complex{BigFloat}[_complex_big(value) for value in parameters]
@@ -745,7 +1001,7 @@ function lauricella_fd_pfaffian(a, b, c; digits::Integer = 50)
             singular_factors = factors,
             singular_degrees = ones(Int, length(factors)),
             basis = labels,
-            digits = Int(digits),
+            digits = working_digits,
             flatness = :declared_flat,
         )
     end
@@ -799,6 +1055,7 @@ function _lauricella_fd_pfaffian_value(
     target::Vector{T};
     digits::Int,
     branch_side::Int,
+    branch_requested::Bool,
     waypoints,
     solver::Symbol,
     frobenius_order::Union{Nothing,Integer},
@@ -806,13 +1063,18 @@ function _lauricella_fd_pfaffian_value(
     maximum_degree::Int,
     maximum_steps::Int,
     verbose::Bool,
+    source_precision::Int,
+    _return_vector::Bool = false,
 ) where {T}
     _lauricella_fd_pfaffian_regular(target, digits) || throw(
         SingularPfaffianError(
             "the explicit derivative-basis Pfaffian connection is singular at the target; use method = :series or :euler there",
         ),
     )
-    transport_digits = digits + _lauricella_fd_pfaffian_guard_digits(target)
+    transport_digits = max(
+        digits + _lauricella_fd_pfaffian_guard_digits(target),
+        _bits_to_digits(source_precision),
+    )
     system = lauricella_fd_pfaffian(a, b, c; digits = transport_digits + 8)
     target_scale = maximum(abs, target; init = zero(BigFloat))
     radial_scale = min(BigFloat("0.20"), BigFloat("0.12") / target_scale)
@@ -824,6 +1086,7 @@ function _lauricella_fd_pfaffian_value(
         BigFloat("0.01"),
     ) || _segment_safe(system, radial_start, target, zero(BigFloat))
     use_radial_path = isnothing(waypoints) &&
+                      (!branch_requested || branch_side == 0) &&
                       _lauricella_fd_pfaffian_regular(radial_start, transport_digits) &&
                       radial_segment_safe
     start = use_radial_path ? radial_start :
@@ -864,6 +1127,7 @@ function _lauricella_fd_pfaffian_value(
                          Int(frobenius_order)
     value = initial
     error_accumulator = Ref(BigFloat(boundary_error))
+    step_counter = Ref(0)
     for segment in 1:(length(path.points) - 1)
         value = if solver === :frobenius
             _integrate_segment_frobenius(
@@ -876,6 +1140,7 @@ function _lauricella_fd_pfaffian_value(
                 maximum_steps,
                 verbose,
                 error_accumulator,
+                step_counter,
             )
         else
             _integrate_segment(
@@ -888,10 +1153,22 @@ function _lauricella_fd_pfaffian_value(
                 maximum_steps,
                 verbose,
                 error_accumulator,
+                step_counter,
             )
         end
     end
-    return first(value), error_accumulator[]
+    metadata = (
+        working_precision = system.bits,
+        working_digits = _bits_to_digits(system.bits),
+        branch_provenance = !isnothing(waypoints) ? :explicit_waypoints :
+                            branch_requested ? :explicit_branch : :automatic,
+        path_provenance = path.planner,
+        path_class = path.path_class,
+        path_segments = length(path.points) - 1,
+        work_degree = solver === :frobenius ? local_series_order : nothing,
+        work_steps = step_counter[],
+    )
+    return (_return_vector ? value : first(value)), error_accumulator[], metadata
 end
 
 function _select_lauricella_fd_method(
@@ -902,8 +1179,10 @@ function _select_lauricella_fd_method(
     digits::Int,
     maximum_degree::Int,
     series_cost_gate::Int,
+    exact_ac_cancellation::Bool = a == c,
 )
-    _lauricella_fd_closed_form_applicable(a, c, x) && return :closed_form
+    exact_ac_cancellation && _lauricella_fd_closed_form_applicable(a, c, x) &&
+        return :closed_form
     termination_degree = _lauricella_fd_termination_degree(a)
     if !isnothing(termination_degree) && termination_degree <= maximum_degree
         variables = max(length(x), 1)
@@ -924,13 +1203,15 @@ function _select_lauricella_fd_method(
         _saturating_add(estimate, 1),
         _saturating_add(estimate, _saturating_add(variables, 1)),
     )
-    if estimate != typemax(Int) && estimate <= maximum_degree &&
+    portfolio_degree_limit = min(maximum_degree, 500 + 6digits)
+    if estimate != typemax(Int) && estimate <= portfolio_degree_limit &&
        estimated_cost != typemax(Int) && estimated_cost <= series_cost_gate
         return :series
     end
     _lauricella_fd_euler_applicable(a, c, x) && return :euler
     _lauricella_fd_pfaffian_regular(x, digits) && return :pfaffian
-    if maximum(abs, x; init = zero(BigFloat)) < 1 && estimate <= maximum_degree
+    if maximum(abs, x; init = zero(BigFloat)) < 1 && estimate <= maximum_degree &&
+       estimated_cost != typemax(Int) && estimated_cost <= series_cost_gate
         return :series
     end
     throw(
@@ -953,14 +1234,15 @@ function _lauricella_fd_evaluate(
     solver::Symbol = :collocation,
     frobenius_order::Union{Nothing,Integer} = nothing,
     stages::Union{Nothing,Integer} = nothing,
-    maximum_degree::Integer = 260,
+    maximum_degree::Integer = 1_200,
     maximum_steps::Integer = 20_000,
     verbose::Bool = false,
-    series_cost_gate::Integer = 50_000,
+    series_cost_gate::Integer = 2_000_000,
     euler_maximum_levels::Integer = 10,
     euler_maximum_nodes::Integer = 100_001,
     certified::Bool = false,
     return_diagnostics::Bool = false,
+    _derivative_sink = nothing,
     _started_ns::UInt64 = time_ns(),
 )
     _check_lauricella_fd_method(method)
@@ -987,27 +1269,50 @@ function _lauricella_fd_evaluate(
 
     parameters = collect(b)
     arguments = collect(x)
+    exact_ac_cancellation = a == c
+    requested_digits = Int(digits)
     length(arguments) == length(parameters) || throw(
         DimensionMismatch("x and b must have the same length"),
     )
     isempty(arguments) && throw(ArgumentError("Lauricella FD requires at least one variable"))
     isnothing(waypoints) || all(length(point) == length(arguments) for point in waypoints) ||
         throw(DimensionMismatch("a contour waypoint has the wrong length"))
+    source_values = Any[a, c, parameters..., arguments...]
+    isnothing(waypoints) || foreach(point -> append!(source_values, point), waypoints)
+    source_precision = _maximum_source_precision_bits(source_values)
+    base_working_digits = requested_digits + 14
+    base_working_precision = max(_digits_to_bits(base_working_digits), source_precision)
+    base_working_digits = max(base_working_digits, _bits_to_digits(base_working_precision))
     contour_requested = !isnothing(branch_side) || !isnothing(waypoints)
-    active = contour_requested ?
+    active = !isnothing(_derivative_sink) ? collect(eachindex(arguments)) :
+             contour_requested ?
              [index for index in eachindex(arguments) if !iszero(parameters[index])] :
              [
                  index for index in eachindex(arguments)
                  if !iszero(arguments[index]) && !iszero(parameters[index])
              ]
     if isempty(active)
-        value = BigFloat(1)
+        value = setprecision(BigFloat, base_working_precision) do
+            BigFloat(1)
+        end
         return return_diagnostics ?
-               _lauricella_fd_result(value, :constant, 0, 0, 0, _started_ns) : value
+               _lauricella_fd_result(
+                   value,
+                   :constant,
+                   0,
+                   0,
+                   0,
+                   _started_ns;
+                   convergence_test = :exact_reduction,
+                   working_precision = base_working_precision,
+                   working_digits = base_working_digits,
+                   path_provenance = :principal_reduction,
+                   work_steps = 0,
+               ) : value
     end
     active_b = parameters[active]
     active_x = arguments[active]
-    if !contour_requested
+    if !contour_requested && isnothing(_derivative_sink)
         compressed_b = Any[]
         compressed_x = Any[]
         for (parameter, argument) in zip(active_b, active_x)
@@ -1023,9 +1328,23 @@ function _lauricella_fd_evaluate(
         active_b = compressed_b[retained]
         active_x = compressed_x[retained]
         if isempty(active_x)
-            value = BigFloat(1)
+            value = setprecision(BigFloat, base_working_precision) do
+                BigFloat(1)
+            end
             return return_diagnostics ?
-                   _lauricella_fd_result(value, :constant, 0, 0, 0, _started_ns) : value
+                   _lauricella_fd_result(
+                       value,
+                       :constant,
+                       0,
+                       0,
+                       0,
+                       _started_ns;
+                       convergence_test = :exact_reduction,
+                       working_precision = base_working_precision,
+                       working_digits = base_working_digits,
+                       path_provenance = :principal_reduction,
+                       work_steps = 0,
+                   ) : value
         end
     end
     active_waypoints = if isnothing(waypoints)
@@ -1034,10 +1353,10 @@ function _lauricella_fd_evaluate(
         [[point[index] for index in active] for point in waypoints]
     end
 
-    requested_digits = Int(digits)
     input_guard_digits = _lauricella_fd_input_guard_digits(a, active_b, c, active_x)
     working_digits = requested_digits + 14 + input_guard_digits
-    bits = _digits_to_bits(working_digits)
+    bits = max(_digits_to_bits(working_digits), source_precision)
+    working_digits = max(working_digits, _bits_to_digits(bits))
     return setprecision(BigFloat, bits) do
         numeric_a = _complex_big(a)
         numeric_b = Complex{BigFloat}[_complex_big(value) for value in active_b]
@@ -1049,6 +1368,42 @@ function _lauricella_fd_evaluate(
                 "method = :closed_form, :series, and :euler do not accept branch_side or waypoints",
             ),
         )
+        if exact_ac_cancellation &&
+           (method === :pfaffian || (contour_requested && method === :auto))
+            continued = _lauricella_fd_continued_product(
+                numeric_b,
+                numeric_x;
+                branch_side = isnothing(branch_side) ? -1 : Int(branch_side),
+                branch_requested = !isnothing(branch_side),
+                waypoints = active_waypoints,
+                derivatives = !isnothing(_derivative_sink),
+            )
+            value = _chop_value(continued.value, requested_digits)
+            derivative_values = isnothing(continued.derivatives) ? nothing :
+                                [
+                                    _chop_value(item, requested_digits) for
+                                    item in continued.derivatives
+                                ]
+            isnothing(_derivative_sink) || (_derivative_sink[] = derivative_values)
+            return return_diagnostics ?
+                   _lauricella_fd_result(
+                       value,
+                       :pfaffian,
+                       nothing,
+                       continued.error_estimate,
+                       length(active_x),
+                       _started_ns;
+                       derivatives = derivative_values,
+                       convergence_test = :exact_reduction,
+                       working_precision = bits,
+                       working_digits,
+                       branch_provenance = continued.branch_provenance,
+                       path_provenance = continued.path_provenance,
+                       path_class = continued.path_class,
+                       path_segments = continued.path_segments,
+                       work_steps = continued.path_segments,
+                   ) : value
+        end
         selected = if method === :auto && contour_requested
             _lauricella_fd_pfaffian_regular(numeric_x, evaluation_digits) || throw(
                 SingularPfaffianError(
@@ -1065,21 +1420,33 @@ function _lauricella_fd_evaluate(
                 digits = evaluation_digits,
                 maximum_degree = Int(maximum_degree),
                 series_cost_gate = Int(series_cost_gate),
+                exact_ac_cancellation,
             )
         else
             method
         end
 
         if selected === :closed_form
-            _lauricella_fd_closed_form_parameters(numeric_a, numeric_c) || throw(
+            exact_ac_cancellation || throw(
                 ArgumentError(
-                    "method = :closed_form requires a = c away from a nonpositive integral lower parameter",
+                    "method = :closed_form requires a = c",
                 ),
             )
             value = _chop_value(
                 _lauricella_fd_closed_form(numeric_b, numeric_x),
                 requested_digits,
             )
+            derivative_values = nothing
+            if !isnothing(_derivative_sink)
+                derivative_values = [
+                    _chop_value(
+                        value * numeric_b[index] /
+                        (one(eltype(numeric_x)) - numeric_x[index]),
+                        requested_digits,
+                    ) for index in eachindex(numeric_x)
+                ]
+                _derivative_sink[] = derivative_values
+            end
             error_estimate = eps(BigFloat) * max(abs(value), one(BigFloat))
             return return_diagnostics ?
                    _lauricella_fd_result(
@@ -1088,11 +1455,20 @@ function _lauricella_fd_evaluate(
                        nothing,
                        error_estimate,
                        length(active_x),
-                       _started_ns,
+                       _started_ns;
+                       derivatives = derivative_values,
+                       convergence_test = :exact_reduction,
+                       working_precision = bits,
+                       working_digits,
+                       path_provenance = :principal_reduction,
+                       path_class = :principal,
+                       path_segments = 0,
+                       work_steps = 0,
                    ) : value
         end
 
         if selected === :series
+            precision_sink = Ref{Any}(nothing)
             values, converged, degree, error_estimate, convergence_test =
                 _lauricella_fd_series_checked(
                 a,
@@ -1102,9 +1478,18 @@ function _lauricella_fd_evaluate(
                 digits = evaluation_digits,
                 maximum_degree = Int(maximum_degree),
                 input_guard_digits,
+                _precision_sink = precision_sink,
             )
             if converged
                 value = _chop_value(first(values), requested_digits)
+                derivative_values = nothing
+                if !isnothing(_derivative_sink)
+                    derivative_values = [
+                        _chop_value(item, requested_digits) for item in values[2:end]
+                    ]
+                    _derivative_sink[] = derivative_values
+                end
+                series_precision, series_digits = precision_sink[]
                 return return_diagnostics ?
                        _lauricella_fd_result(
                            value,
@@ -1114,6 +1499,14 @@ function _lauricella_fd_evaluate(
                            length(active_x),
                            _started_ns;
                            convergence_test,
+                           derivatives = derivative_values,
+                           working_precision = series_precision,
+                           working_digits = series_digits,
+                           path_provenance = :principal_series,
+                           path_class = :principal,
+                           path_segments = 0,
+                           work_degree = degree,
+                           work_steps = degree + 1,
                        ) : value
             elseif method !== :auto
                 throw(
@@ -1136,37 +1529,87 @@ function _lauricella_fd_evaluate(
 
         value = nothing
         error_estimate = BigFloat(Inf)
+        method_metadata = (
+            working_precision = bits,
+            working_digits,
+            branch_provenance = :principal,
+            path_provenance = :unknown,
+            path_class = :principal,
+            path_segments = nothing,
+            work_degree = nothing,
+            work_steps = nothing,
+        )
         if selected === :euler
-            result, converged, _, _, estimate = _lauricella_fd_euler(
-                numeric_a,
-                numeric_b,
-                numeric_c,
-                numeric_x;
-                digits = evaluation_digits,
-                maximum_levels = Int(euler_maximum_levels),
-                maximum_nodes = Int(euler_maximum_nodes),
-            )
-            if converged
-                value = result
-                error_estimate = estimate
-            elseif method === :auto &&
-                   _lauricella_fd_pfaffian_regular(numeric_x, evaluation_digits)
-                selected = :pfaffian
-                value, error_estimate = _lauricella_fd_pfaffian_value(
+            result, converged, levels, nodes, estimate = if isnothing(_derivative_sink)
+                _lauricella_fd_euler(
                     numeric_a,
                     numeric_b,
                     numeric_c,
                     numeric_x;
                     digits = evaluation_digits,
-                    branch_side = isnothing(branch_side) ? -1 : Int(branch_side),
-                    waypoints = active_waypoints,
-                    solver,
-                    frobenius_order,
-                    stages,
-                    maximum_degree = Int(maximum_degree),
-                    maximum_steps = Int(maximum_steps),
-                    verbose,
+                    maximum_levels = Int(euler_maximum_levels),
+                    maximum_nodes = Int(euler_maximum_nodes),
                 )
+            else
+                _lauricella_fd_euler_vector(
+                    numeric_a,
+                    numeric_b,
+                    numeric_c,
+                    numeric_x;
+                    digits = evaluation_digits,
+                    maximum_levels = Int(euler_maximum_levels),
+                    maximum_nodes = Int(euler_maximum_nodes),
+                )
+            end
+            if converged
+                if isnothing(_derivative_sink)
+                    value = result
+                else
+                    value = first(result)
+                    _derivative_sink[] = [
+                        _chop_value(item, requested_digits) for item in result[2:end]
+                    ]
+                end
+                error_estimate = estimate
+                method_metadata = merge(
+                    method_metadata,
+                    (
+                        path_provenance = :principal_euler,
+                        path_segments = 0,
+                        work_degree = levels,
+                        work_steps = nodes,
+                    ),
+                )
+            elseif method === :auto &&
+                   _lauricella_fd_pfaffian_regular(numeric_x, evaluation_digits)
+                selected = :pfaffian
+                transported, error_estimate, method_metadata =
+                    _lauricella_fd_pfaffian_value(
+                        numeric_a,
+                        numeric_b,
+                        numeric_c,
+                        numeric_x;
+                        digits = evaluation_digits,
+                        branch_side = isnothing(branch_side) ? -1 : Int(branch_side),
+                        branch_requested = !isnothing(branch_side),
+                        waypoints = active_waypoints,
+                        solver,
+                        frobenius_order,
+                        stages,
+                        maximum_degree = Int(maximum_degree),
+                        maximum_steps = Int(maximum_steps),
+                        verbose,
+                        source_precision,
+                        _return_vector = !isnothing(_derivative_sink),
+                    )
+                if isnothing(_derivative_sink)
+                    value = transported
+                else
+                    value = first(transported)
+                    _derivative_sink[] = [
+                        _chop_value(item, requested_digits) for item in transported[2:end]
+                    ]
+                end
             else
                 throw(
                     ErrorException(
@@ -1175,13 +1618,14 @@ function _lauricella_fd_evaluate(
                 )
             end
         elseif selected === :pfaffian
-            value, error_estimate = _lauricella_fd_pfaffian_value(
+            transported, error_estimate, method_metadata = _lauricella_fd_pfaffian_value(
                 numeric_a,
                 numeric_b,
                 numeric_c,
                 numeric_x;
                 digits = evaluation_digits,
                 branch_side = isnothing(branch_side) ? -1 : Int(branch_side),
+                branch_requested = !isnothing(branch_side),
                 waypoints = active_waypoints,
                 solver,
                 frobenius_order,
@@ -1189,11 +1633,22 @@ function _lauricella_fd_evaluate(
                 maximum_degree = Int(maximum_degree),
                 maximum_steps = Int(maximum_steps),
                 verbose,
+                source_precision,
+                _return_vector = !isnothing(_derivative_sink),
             )
+            if isnothing(_derivative_sink)
+                value = transported
+            else
+                value = first(transported)
+                _derivative_sink[] = [
+                    _chop_value(item, requested_digits) for item in transported[2:end]
+                ]
+            end
         else
             error("internal error: unsupported specialized Lauricella FD method")
         end
         value = _chop_value(value, requested_digits)
+        derivative_values = isnothing(_derivative_sink) ? nothing : _derivative_sink[]
         return return_diagnostics ?
                _lauricella_fd_result(
                    value,
@@ -1201,7 +1656,9 @@ function _lauricella_fd_evaluate(
                    nothing,
                    error_estimate,
                    length(active_x),
-                   _started_ns,
+                   _started_ns;
+                   derivatives = derivative_values,
+                   method_metadata...,
                ) : value
     end
 end

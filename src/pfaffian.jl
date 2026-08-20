@@ -1,6 +1,58 @@
 # SPDX-FileCopyrightText: 2026 NAKANO Ryuosuke and contributors
 # SPDX-License-Identifier: GPL-3.0-only
 
+const _PFAFFIAN_SYSTEM_CACHE_LOCK = ReentrantLock()
+const _PFAFFIAN_SYSTEM_CACHE = Dict{Any,Any}()
+const _PFAFFIAN_SYSTEM_CACHE_ORDER = Any[]
+const _PFAFFIAN_SYSTEM_CACHE_LIMIT = 8
+
+function _pfaffian_system_cache_key(
+    numeric::NumericHornSeries{N},
+    bits::Int,
+    digits::Int,
+    maximum_seed,
+) where {N}
+    upper = Tuple((factor.parameter, factor.weights) for factor in numeric.upper)
+    lower = Tuple((factor.parameter, factor.weights) for factor in numeric.lower)
+    return (N, bits, digits, maximum_seed, upper, lower)
+end
+
+function _clear_pfaffian_system_cache!()
+    lock(_PFAFFIAN_SYSTEM_CACHE_LOCK) do
+        empty!(_PFAFFIAN_SYSTEM_CACHE)
+        empty!(_PFAFFIAN_SYSTEM_CACHE_ORDER)
+    end
+    return nothing
+end
+
+function _derive_pfaffian_cached(
+    numeric::NumericHornSeries,
+    bits::Int,
+    digits::Int,
+    maximum_seed,
+)
+    key = _pfaffian_system_cache_key(numeric, bits, digits, maximum_seed)
+    cached = lock(_PFAFFIAN_SYSTEM_CACHE_LOCK) do
+        get(_PFAFFIAN_SYSTEM_CACHE, key, nothing)
+    end
+    isnothing(cached) || return cached, true
+
+    system = _derive_pfaffian(numeric, bits, digits, maximum_seed)
+    lock(_PFAFFIAN_SYSTEM_CACHE_LOCK) do
+        if !haskey(_PFAFFIAN_SYSTEM_CACHE, key)
+            while length(_PFAFFIAN_SYSTEM_CACHE_ORDER) >= _PFAFFIAN_SYSTEM_CACHE_LIMIT
+                oldest = popfirst!(_PFAFFIAN_SYSTEM_CACHE_ORDER)
+                delete!(_PFAFFIAN_SYSTEM_CACHE, oldest)
+            end
+            _PFAFFIAN_SYSTEM_CACHE[key] = system
+            push!(_PFAFFIAN_SYSTEM_CACHE_ORDER, key)
+        else
+            system = _PFAFFIAN_SYSTEM_CACHE[key]
+        end
+    end
+    return system, false
+end
+
 function _multiply_affine(
     polynomial::MVPolynomial{N,T},
     constant::T,

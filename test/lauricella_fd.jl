@@ -43,6 +43,10 @@ using Test
     )
     @test fallback_value.method_used === :pfaffian
     @test isapprox(fallback_value.value, euler_value; atol = big"1e-6", rtol = 0)
+    @test fallback_value.working_precision <= HyperPrecision._digits_to_bits(24)
+    @test fallback_value.working_digits ==
+          HyperPrecision._bits_to_digits(fallback_value.working_precision)
+    @test fallback_value.work_steps < 20_000
     @test_throws ErrorException lauricella_fd(
         a,
         b,
@@ -531,6 +535,175 @@ end
         interior_x;
         method = :closed_form,
     )
+
+    negative_b = [1//3, 1//4]
+    negative_x = [1//5, 1//7]
+    negative_oracle = BigFloat(
+        "1.119541082677589185743562594509095624207151987402197",
+    )
+    negative_result = lauricella_fd(
+        -2,
+        negative_b,
+        -2,
+        negative_x;
+        digits = 30,
+        return_diagnostics = true,
+    )
+    @test negative_result.method_used === :closed_form
+    @test isapprox(negative_result.value, negative_oracle; atol = big"1e-29", rtol = 0)
+    @test isnothing(negative_result.derivatives)
+    @test negative_result.convergence_test === :exact_reduction
+    @test negative_result.error_status === :rounded
+    @test !negative_result.certified
+    @test negative_result.working_precision >= ceil(Int, (30 + 14) * log2(10))
+    @test negative_result.working_digits >= 30
+    @test negative_result.compressed_dimension == 2
+    @test negative_result.path_provenance === :principal_reduction
+    @test negative_result.path_class === :principal
+    @test negative_result.path_segments == 0
+    @test isnothing(negative_result.work_degree)
+    @test negative_result.work_steps == 0
+
+    derivative_oracle = BigFloat[
+        negative_oracle * 5 / 12,
+        negative_oracle * 7 / 24,
+    ]
+    derivative_result = lauricella_fd(
+        -2,
+        negative_b,
+        -2,
+        negative_x;
+        digits = 30,
+        derivatives = true,
+        return_diagnostics = true,
+    )
+    @test derivative_result.method_used === :closed_form
+    @test length(derivative_result.derivatives) == length(negative_x)
+    for index in eachindex(derivative_oracle)
+        @test isapprox(
+            derivative_result.derivatives[index],
+            derivative_oracle[index];
+            atol = big"1e-29",
+            rtol = 0,
+        )
+    end
+
+    radial_result = lauricella_fd(
+        -2,
+        negative_b,
+        -2,
+        negative_x;
+        digits = 30,
+        branch_side = 0,
+        derivatives = true,
+        return_diagnostics = true,
+    )
+    @test radial_result.method_used === :pfaffian
+    @test radial_result.branch_provenance === :explicit_branch
+    @test radial_result.path_provenance === :radial
+    @test radial_result.path_class === :principal
+    @test radial_result.path_segments == 1
+    @test isapprox(radial_result.value, negative_oracle; atol = big"1e-29", rtol = 0)
+    @test length(radial_result.derivatives) == length(negative_x)
+    for index in eachindex(derivative_oracle)
+        @test isapprox(
+            radial_result.derivatives[index],
+            derivative_oracle[index];
+            atol = big"1e-29",
+            rtol = 0,
+        )
+    end
+
+    waypoint_result = lauricella_fd(
+        -2,
+        negative_b,
+        -2,
+        negative_x;
+        digits = 30,
+        waypoints = [[complex(1//10, 1//50), complex(1//14, -1//60)]],
+        derivatives = true,
+        return_diagnostics = true,
+    )
+    @test waypoint_result.method_used === :pfaffian
+    @test waypoint_result.branch_provenance === :explicit_waypoints
+    @test waypoint_result.path_provenance === :explicit_waypoints
+    @test waypoint_result.path_class === :user
+    @test waypoint_result.path_segments == 2
+    @test isapprox(waypoint_result.value, negative_oracle; atol = big"1e-29", rtol = 0)
+    @test length(waypoint_result.derivatives) == length(negative_x)
+    for index in eachindex(derivative_oracle)
+        @test isapprox(
+            waypoint_result.derivatives[index],
+            derivative_oracle[index];
+            atol = big"1e-29",
+            rtol = 0,
+        )
+    end
+
+    setprecision(BigFloat, 700) do
+        high_precision_x = [BigFloat(1) / 5, BigFloat(1) / 7]
+        low_digits = lauricella_fd(
+            1//3,
+            negative_b,
+            7//6,
+            high_precision_x;
+            digits = 15,
+            method = :series,
+            return_diagnostics = true,
+        )
+        high_reference = lauricella_fd(
+            1//3,
+            negative_b,
+            7//6,
+            high_precision_x;
+            digits = 100,
+            method = :series,
+        )
+        @test all(precision(value) == 700 for value in high_precision_x)
+        @test low_digits.working_precision >= 700
+        @test low_digits.working_digits >= floor(Int, 700 / log2(10))
+        @test low_digits.error_status === :a_posteriori
+        @test abs(low_digits.value - high_reference) <= low_digits.error_estimate
+
+        generic_details = lauricella_fd(
+            1//3,
+            negative_b,
+            7//6,
+            high_precision_x;
+            digits = 8,
+            method = :generic,
+            return_diagnostics = true,
+        )
+        @test generic_details.working_precision >= 700
+        @test generic_details.working_digits >= floor(Int, 700 / log2(10))
+        @test generic_details.error_status === :unknown
+        @test isnothing(generic_details.work_degree)
+        @test isnothing(generic_details.work_steps)
+        @test isapprox(generic_details.value, high_reference; atol = big"1e-7", rtol = 0)
+
+        high_waypoints = [[
+            Complex{BigFloat}(BigFloat(1) / 10, BigFloat("1e-80")),
+            Complex{BigFloat}(BigFloat(1) / 14, -BigFloat("1e-80")),
+        ]]
+        high_path = lauricella_fd(
+            -2,
+            negative_b,
+            -2,
+            negative_x;
+            digits = 8,
+            waypoints = high_waypoints,
+            derivatives = true,
+            return_diagnostics = true,
+        )
+        @test high_path.working_precision >= 700
+        @test high_path.working_digits >= floor(Int, 700 / log2(10))
+        @test high_path.branch_provenance === :explicit_waypoints
+        @test high_path.path_provenance === :explicit_waypoints
+        @test high_path.path_class === :user
+        @test high_path.path_segments == 2
+        @test length(high_path.derivatives) == length(negative_x)
+        @test isapprox(high_path.value, negative_oracle; atol = big"1e-7", rtol = 0)
+    end
 end
 
 @testset "Seven-variable Lauricella FD" begin

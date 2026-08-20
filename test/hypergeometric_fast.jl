@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 NAKANO Ryuosuke and contributors
 # SPDX-License-Identifier: GPL-3.0-only
 
+include(joinpath(@__DIR__, "..", "benchmark", "production_dispatch.jl"))
+
 @testset "Generalized hypergeometric native recurrence" begin
     z = big"0.25"
     gauss = hypergeometric_2f1(
@@ -20,6 +22,15 @@
     shifted = hypergeometric_2f1(2, 2, 3, z; digits = 28, method = :series)
     @test isapprox(only(gauss.derivatives), shifted / 2; atol = big"1e-27", rtol = 0)
     @test gauss.error_estimate >= big"1e-28" * max(abs(gauss.value), 1)
+    @test gauss.working_precision >= ceil(Int, (28 + 20) * log2(10))
+    @test gauss.working_digits >= 28
+    @test gauss.error_status === :a_posteriori
+    @test gauss.compressed_dimension == 1
+    @test gauss.path_provenance === :principal_series
+    @test gauss.path_class === :principal
+    @test gauss.path_segments == 0
+    @test gauss.work_degree == gauss.degree
+    @test gauss.work_steps == gauss.terms
 
     @test isapprox(
         hypergeometric_pfq([], [], z; digits = 28, method = :series),
@@ -233,6 +244,15 @@
     principal = hypergeometric_2f1(1//3, 1//4, 5//4, 1//10; digits = 16)
     @test path_value.method_used === :pfaffian
     @test isapprox(path_value.value, principal; atol = big"1e-8", rtol = 0)
+    @test path_value.error_status === :unknown
+    @test path_value.working_precision >= ceil(Int, (9 + 14) * log2(10))
+    @test path_value.compressed_dimension == 1
+    @test path_value.branch_provenance === :explicit_waypoints
+    @test path_value.path_provenance === :explicit_waypoints
+    @test path_value.path_class === :user
+    @test path_value.path_segments == 2
+    @test isnothing(path_value.work_degree)
+    @test isnothing(path_value.work_steps)
     @test_throws ArgumentError hypergeometric_2f1(
         1//3,
         1//4,
@@ -269,6 +289,471 @@
         digits = 20,
     )
     @test certified isa CertifiedResult
+
+    certified_details = hypergeometric_2f1(
+        1//2,
+        1//2,
+        1,
+        1//4;
+        certified = true,
+        digits = 15,
+        return_diagnostics = true,
+    )
+    lower, upper = certified_interval(certified_details.value)
+    midpoint = (lower + upper) / 2
+    enclosure_radius = max(abs(midpoint - lower), abs(upper - midpoint))
+    @test certified_details.certified
+    @test is_certified(certified_details)
+    @test certified_details.error_status === :certified
+    @test certified_details.error_estimate > 0
+    @test certified_details.error_estimate >= enclosure_radius
+    @test certified_details.convergence_test === :ball_enclosure
+    @test certified_details.path_provenance === :certified_enclosure
+    @test certified_details.path_class === :principal
+    @test certified_details.path_segments == 0
+    @test isnothing(certified_details.work_degree)
+    @test isnothing(certified_details.work_steps)
+end
+
+@testset "Source precision propagation" begin
+    setprecision(BigFloat, 700) do
+        high_a = BigFloat(1) / 3
+        high_b = BigFloat(2) / 5
+        high_c = BigFloat(5) / 4
+        high_z = BigFloat(1) / 20
+        high_reference = hypergeometric_2f1(
+            high_a,
+            high_b,
+            high_c,
+            high_z;
+            digits = 35,
+            method = :series,
+        )
+        native = hypergeometric_2f1(
+            high_a,
+            high_b,
+            high_c,
+            high_z;
+            digits = 8,
+            method = :series,
+            return_diagnostics = true,
+        )
+        generic = hypergeometric_2f1(
+            high_a,
+            high_b,
+            high_c,
+            high_z;
+            digits = 8,
+            method = :generic,
+            return_diagnostics = true,
+        )
+        pfaffian = hypergeometric_2f1(
+            high_a,
+            high_b,
+            high_c,
+            high_z;
+            digits = 8,
+            method = :pfaffian,
+            return_diagnostics = true,
+        )
+        high_waypoint = Complex{BigFloat}(high_z / 2, BigFloat("1e-80"))
+        waypoint = hypergeometric_2f1(
+            high_a,
+            high_b,
+            high_c,
+            high_z;
+            digits = 8,
+            method = :generic,
+            waypoints = [[high_waypoint]],
+            return_diagnostics = true,
+        )
+        @test precision(high_a) == 700
+        for details in (native, generic, pfaffian, waypoint)
+            @test details.working_precision >= 700
+            @test details.working_digits >= floor(Int, 700 / log2(10))
+            @test isapprox(details.value, high_reference; atol = big"1e-7", rtol = 0)
+        end
+        @test native.error_status === :a_posteriori
+        @test abs(native.value - high_reference) <= native.error_estimate
+        @test generic.error_status === :unknown
+        @test isnothing(generic.work_degree)
+        @test isnothing(generic.work_steps)
+        @test pfaffian.method_used === :pfaffian
+        @test pfaffian.path_provenance === :radial
+        @test isnothing(pfaffian.work_degree)
+        @test isnothing(pfaffian.work_steps)
+        @test waypoint.method_used === :pfaffian
+        @test waypoint.branch_provenance === :explicit_waypoints
+        @test waypoint.path_provenance === :explicit_waypoints
+        @test waypoint.path_class === :user
+        @test waypoint.path_segments == 2
+
+        cancelled_source = hypergeometric_pfq(
+            [1//3, high_c],
+            [5//4, high_c],
+            1//20;
+            digits = 8,
+            method = :generic,
+            return_diagnostics = true,
+        )
+        @test cancelled_source.working_precision >= 700
+        @test cancelled_source.working_digits >= floor(Int, 700 / log2(10))
+
+        high_epsilon = BigFloat("1e-40")
+        epsilon_details = hypergeometric_2f1(
+            AffineParameter(1//3, 1//10),
+            2//5,
+            5//4,
+            1//20;
+            epsilon = high_epsilon,
+            digits = 8,
+            method = :generic,
+            return_diagnostics = true,
+        )
+        @test precision(high_epsilon) == 700
+        @test epsilon_details.working_precision >= 700
+        @test epsilon_details.working_digits >= floor(Int, 700 / log2(10))
+        @test epsilon_details.error_status === :unknown
+
+        high_x = BigFloat(1) / 100
+        high_y = BigFloat(1) / 125
+        multivariate_cases = (
+            ("F1", digits -> appell_f1(
+                1//3,
+                1//4,
+                1//5,
+                5//4,
+                high_x,
+                high_y;
+                digits,
+                method = :series,
+                return_diagnostics = true,
+            )),
+            ("F2", digits -> appell_f2(
+                1//3,
+                1//4,
+                1//5,
+                5//4,
+                6//5,
+                high_x,
+                high_y;
+                digits,
+                method = :series,
+                return_diagnostics = true,
+            )),
+            ("F3", digits -> appell_f3(
+                1//3,
+                2//5,
+                1//4,
+                1//6,
+                7//5,
+                high_x,
+                high_y;
+                digits,
+                method = :series,
+                return_diagnostics = true,
+            )),
+            ("F4", digits -> appell_f4(
+                1//5,
+                1//4,
+                6//5,
+                7//6,
+                high_x,
+                high_y;
+                digits,
+                method = :series,
+                return_diagnostics = true,
+            )),
+            ("FA", digits -> lauricella_fa(
+                1//3,
+                [1//4, 1//5],
+                [5//4, 6//5],
+                [high_x, high_y];
+                digits,
+                method = :series,
+                return_diagnostics = true,
+            )),
+            ("FB", digits -> lauricella_fb(
+                [1//3, 2//5],
+                [1//4, 1//6],
+                7//5,
+                [high_x, high_y];
+                digits,
+                method = :series,
+                return_diagnostics = true,
+            )),
+            ("FC", digits -> lauricella_fc(
+                1//5,
+                1//4,
+                [6//5, 7//6],
+                [high_x, high_y];
+                digits,
+                method = :series,
+                return_diagnostics = true,
+            )),
+        )
+        for (label, call) in multivariate_cases
+            details = call(8)
+            reference = call(28)
+            @test details.working_precision >= 700
+            @test details.working_digits >= floor(Int, 700 / log2(10))
+            @test details.error_status === :a_posteriori
+            @test isapprox(details.value, reference.value; atol = big"1e-7", rtol = 0)
+            @test abs(details.value - reference.value) <= details.error_estimate
+        end
+    end
+end
+
+@testset "Production dispatch timing policy" begin
+    threshold = 5.0
+    boundary_probes = (prevfloat(threshold), threshold, nextfloat(threshold))
+    expected_policies = (
+        :five_warm_median,
+        :five_warm_median,
+        :long_candidate_one_sample,
+    )
+    for (probe, expected_policy) in zip(boundary_probes, expected_policies)
+        policy = candidate_sampling_policy(probe, threshold)
+        @test policy === expected_policy
+        candidates = NamedTuple[(
+            method = :series,
+            elapsed = probe,
+            samples = policy === :long_candidate_one_sample ? 1 : WARM_SAMPLES,
+            policy,
+        )]
+        repeats = Ref(0)
+        fastest_index = resolve_long_candidate_fastest!(candidates) do candidate
+            repeats[] += 1
+            merge(
+                candidate,
+                (
+                    elapsed = threshold,
+                    samples = WARM_SAMPLES,
+                    policy = :long_candidate_five_paired,
+                ),
+            )
+        end
+        @test fastest_index == 1
+        @test candidates[1].samples == WARM_SAMPLES
+        @test candidates[1].policy !== :long_candidate_one_sample
+        @test repeats[] == (probe > threshold ? 1 : 0)
+    end
+
+    candidates = NamedTuple[
+        (method = :series, elapsed = 1.0, samples = WARM_SAMPLES, policy = :five_warm_median),
+        (method = :generic, elapsed = 6.0, samples = 1, policy = :long_candidate_one_sample),
+    ]
+    repeats = Ref(0)
+    fastest_index = resolve_long_candidate_fastest!(candidates) do candidate
+        repeats[] += 1
+        merge(
+            candidate,
+            (samples = WARM_SAMPLES, policy = :long_candidate_five_paired),
+        )
+    end
+    @test fastest_index == 1
+    @test repeats[] == 0
+    @test candidates[2].samples == 1
+    @test candidates[2].policy === :long_candidate_one_sample
+
+    automatic_calls = Ref(0)
+    forced_calls = Ref(0)
+    diagnostic_result(method) = (
+        value = BigFloat(1),
+        derivatives = BigFloat[2, 3],
+        error_estimate = big"1e-120",
+        method_used = method,
+    )
+    automatic = () -> begin
+        automatic_calls[] += 1
+        sleep(0.001)
+        diagnostic_result(:series)
+    end
+    forced_call = () -> begin
+        forced_calls[] += 1
+        sleep(0.02)
+        diagnostic_result(:series)
+    end
+    delayed_horn = portfolio_gate(
+        "Horn H3 derivatives 100-digit delayed mock",
+        automatic,
+        Pair{Symbol,Function}[:series => forced_call],
+        100;
+        derivative_oracle = BigFloat[2, 3],
+        long_candidate_seconds = 0.0,
+    )
+    @test automatic_calls[] >= WARM_SAMPLES
+    @test forced_calls[] == WARM_SAMPLES + 1
+    @test delayed_horn.fastest_policy === :long_candidate_five_paired
+    @test delayed_horn.fastest_samples == WARM_SAMPLES
+end
+
+@testset "Production dispatch portfolio" begin
+    arb_near_boundary = hypergeometric_pfq(
+        [1//3, 1//4, 1//5],
+        [7//6, 9//8],
+        big"0.95";
+        digits = 50,
+        method = :arb,
+        derivatives = true,
+        return_diagnostics = true,
+    )
+    automatic_near_boundary = hypergeometric_pfq(
+        [1//3, 1//4, 1//5],
+        [7//6, 9//8],
+        big"0.95";
+        digits = 50,
+        derivatives = true,
+        return_diagnostics = true,
+    )
+    @test arb_near_boundary.method_used === :arb
+    @test automatic_near_boundary.method_used === :arb
+    @test arb_near_boundary.convergence_test === :ball_enclosure
+    @test arb_near_boundary.error_status === :bounded
+    @test automatic_near_boundary.error_status === :bounded
+    @test isapprox(
+        automatic_near_boundary.value,
+        arb_near_boundary.value;
+        atol = big"1e-49",
+        rtol = 0,
+    )
+    @test isapprox(
+        only(automatic_near_boundary.derivatives),
+        only(arb_near_boundary.derivatives);
+        atol = big"1e-48",
+        rtol = 0,
+    )
+    @test_throws ArgumentError hypergeometric_2f1(
+        1//3,
+        1//4,
+        7//6,
+        2;
+        method = :arb,
+        branch_side = 1,
+    )
+
+    upper_cut = hypergeometric_2f1(
+        1//3,
+        1//4,
+        7//6,
+        Complex{BigFloat}(2, big"1e-40");
+        digits = 25,
+        method = :arb,
+    )
+    lower_cut = hypergeometric_2f1(
+        1//3,
+        1//4,
+        7//6,
+        Complex{BigFloat}(2, -big"1e-40");
+        digits = 25,
+        method = :arb,
+    )
+    @test isapprox(upper_cut, conj(lower_cut); atol = big"1e-24", rtol = 0)
+
+    x = big"0.9"
+    y = big"0.7"
+    euler_f1 = appell_f1(
+        1//4,
+        1//3,
+        1//5,
+        1,
+        x,
+        y;
+        digits = 30,
+        method = :euler,
+        derivatives = true,
+        return_diagnostics = true,
+    )
+    derivative_x = (1//4) * (1//3) * appell_f1(
+        5//4,
+        4//3,
+        1//5,
+        2,
+        x,
+        y;
+        digits = 40,
+        method = :euler,
+    )
+    derivative_y = (1//4) * (1//5) * appell_f1(
+        5//4,
+        1//3,
+        6//5,
+        2,
+        x,
+        y;
+        digits = 40,
+        method = :euler,
+    )
+    @test euler_f1.method_used === :euler
+    @test isapprox(euler_f1.derivatives[1], derivative_x; atol = big"1e-29", rtol = 0)
+    @test isapprox(euler_f1.derivatives[2], derivative_y; atol = big"1e-29", rtol = 0)
+
+    fd_series = lauricella_fd(
+        1//4,
+        fill(1//4, 3),
+        1,
+        [big"0.6", big"0.48", big"0.36"];
+        digits = 50,
+        return_diagnostics = true,
+    )
+    fd_euler = lauricella_fd(
+        1//4,
+        fill(1//4, 3),
+        1,
+        [big"0.95", big"0.76", big"0.57"];
+        digits = 50,
+        return_diagnostics = true,
+    )
+    @test fd_series.method_used === :series
+    @test fd_euler.method_used === :euler
+
+    horn_interior = horn_h3(
+        1//3,
+        2//5,
+        5//4,
+        2//25,
+        2//25;
+        digits = 18,
+        return_diagnostics = true,
+    )
+    horn_generic = horn_h3(
+        1//3,
+        2//5,
+        5//4,
+        2//25,
+        2//25;
+        digits = 24,
+        method = :generic,
+    )
+    @test horn_interior.method_used === :series
+    @test isapprox(horn_interior.value, horn_generic; atol = big"1e-17", rtol = 0)
+
+    HyperPrecision._clear_pfaffian_system_cache!()
+    gauss_series = HyperPrecision._pfq_series([1//3, 1//4], [7//6])
+    first_transport = evaluate(
+        gauss_series,
+        [big"0.2"];
+        digits = 12,
+        branch_side = 0,
+        maximum_degree = 120,
+    )
+    @test length(HyperPrecision._PFAFFIAN_SYSTEM_CACHE) == 1
+    second_transport = evaluate(
+        gauss_series,
+        [big"0.2"];
+        digits = 12,
+        branch_side = 0,
+        maximum_degree = 120,
+    )
+    @test first_transport == second_transport
+    @test_throws ArgumentError evaluate(
+        gauss_series,
+        [big"0.2"];
+        digits = 12,
+        branch_side = 0,
+        maximum_degree = 120,
+        maximum_pfaffian_work = 1,
+    )
 end
 
 @testset "Cancellation, poles, and precision reruns" begin
@@ -529,7 +1014,7 @@ end
     )
     @test isapprox(diagonal_horn, diagonal_horn_reference; rtol = big"1e-17", atol = 0)
 
-    setprecision(BigFloat, 768) do
+    setprecision(BigFloat, 700) do
         delayed_pole = Complex{BigFloat}(BigFloat(-100), BigFloat("1e-100"))
         delayed_reference = hypergeometric_2f1(
             BigFloat(1) / 3,
@@ -551,6 +1036,16 @@ end
         )
         @test delayed_automatic.method_used === :series
         @test delayed_automatic.degree > 100
+        @test precision(real(delayed_pole)) == 700
+        @test delayed_automatic.working_precision >= 700
+        @test delayed_automatic.working_digits >= floor(Int, 700 / log2(10))
+        @test delayed_automatic.error_status === :a_posteriori
+        @test delayed_automatic.compressed_dimension == 1
+        @test delayed_automatic.path_provenance === :principal_series
+        @test delayed_automatic.path_class === :principal
+        @test delayed_automatic.path_segments == 0
+        @test delayed_automatic.work_degree == delayed_automatic.degree
+        @test delayed_automatic.work_steps == delayed_automatic.terms
         @test isapprox(
             delayed_automatic.value,
             delayed_reference;
@@ -917,7 +1412,7 @@ end
         return_diagnostics = true,
     )
     @test f1_plain.terms == something(f1_plain.degree) + 1
-    @test f1_derivatives.terms > f1_plain.terms
+    @test f1_derivatives.terms == f1_plain.terms
 
     @test_throws ArgumentError hypergeometric_2f1(
         1//3,
@@ -1168,6 +1663,9 @@ end
 @testset "Horn neighbor-ratio grids" begin
     x = 1 // 50
     y = 3 // 200
+    high_x, high_y = setprecision(BigFloat, 700) do
+        BigFloat(x), BigFloat(y)
+    end
     cases = (
         (horn_g1, (1//3, 2//5, 3//7, x, y)),
         (horn_g2, (1//3, 2//5, 3//7, 4//9, x, y)),
@@ -1184,6 +1682,20 @@ end
         native = function_value(arguments...; digits = 15, method = :series)
         generic = function_value(arguments...; digits = 15, method = :generic)
         @test isapprox(native, generic; atol = big"1e-14", rtol = 0)
+        high_arguments = Any[arguments...]
+        high_arguments[end - 1] = high_x
+        high_arguments[end] = high_y
+        high_details = function_value(
+            high_arguments...;
+            digits = 8,
+            method = :series,
+            return_diagnostics = true,
+        )
+        @test high_details.working_precision >= 700
+        @test high_details.working_digits >= floor(Int, 700 / log2(10))
+        @test high_details.error_status === :a_posteriori
+        @test isapprox(high_details.value, generic; atol = big"1e-7", rtol = 0)
+        @test abs(high_details.value - generic) <= high_details.error_estimate
     end
 
     h3_axis = horn_h3(1//3, 2//5, 5//4, x, 0; digits = 22, method = :series)

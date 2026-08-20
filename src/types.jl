@@ -504,6 +504,86 @@ end
 _digits_to_bits(digits::Integer; guard::Integer = 20) =
     ceil(Int, (digits + guard) * log2(10))
 
+_bits_to_digits(bits::Integer) = max(0, floor(Int, bits / log2(10)))
+
+function _source_precision_bits(value::Number)
+    bits = 0
+    real_value = real(value)
+    imaginary_value = imag(value)
+    real_value isa AbstractFloat && (bits = max(bits, precision(real_value)))
+    imaginary_value isa AbstractFloat && (bits = max(bits, precision(imaginary_value)))
+    return bits
+end
+
+_source_precision_bits(value::AffineParameter) = max(
+    _source_precision_bits(value.constant),
+    _source_precision_bits(value.slope),
+)
+
+function _source_precision_bits(values::Union{Tuple,AbstractArray})
+    return maximum(_source_precision_bits, values; init = 0)
+end
+
+function _source_precision_bits(series::HornSeries)
+    bits = 0
+    for factor in Iterators.flatten((series.upper, series.lower))
+        bits = max(bits, _source_precision_bits(factor.parameter))
+    end
+    return bits
+end
+
+_source_precision_bits(::Any) = 0
+
+function _maximum_source_precision_bits(values)
+    return maximum(_source_precision_bits, values; init = 0)
+end
+
+function _record_working_precision!(sink, bits::Integer)
+    isnothing(sink) && return nothing
+    precision_bits = Int(bits)
+    previous = sink[]
+    if isnothing(previous) || precision_bits > previous.working_precision
+        sink[] = (
+            working_precision = precision_bits,
+            working_digits = _bits_to_digits(precision_bits),
+        )
+    end
+    return nothing
+end
+
+function _diagnostic_precision_bits(value, derivatives = nothing)
+    bits = _source_precision_bits(value)
+    if !isnothing(derivatives)
+        bits = max(bits, _maximum_source_precision_bits(derivatives))
+    end
+    value isa CertifiedResult && (bits = max(bits, value.working_bits))
+    return bits
+end
+
+function _diagnostic_error_status(
+    error_estimate,
+    convergence_test;
+    certified::Bool = false,
+)
+    certified && return :certified
+    estimate = BigFloat(error_estimate)
+    isfinite(estimate) || return :unknown
+    convergence_test === :ball_enclosure && return :bounded
+    convergence_test in (
+        :ratio_majorant,
+        :majorant,
+        :doubled_degree,
+        :precision_rerun,
+    ) && return :a_posteriori
+    convergence_test in (
+        :closed_form,
+        :exact_reduction,
+        :exact_termination,
+        :finite_termination,
+    ) && return :rounded
+    return :a_posteriori
+end
+
 function _complex_big(value::Number)
     return Complex{BigFloat}(BigFloat(real(value)), BigFloat(imag(value)))
 end
